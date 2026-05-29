@@ -1,0 +1,902 @@
+import { useSyncExternalStore } from "react";
+import type { AppSettings } from "../shell/SettingsDialog";
+
+const STORAGE_KEY = "teamai-settings";
+
+// ---------------------------------------------------------------------------
+// Translations
+// ---------------------------------------------------------------------------
+
+const zh: Record<string, string> = {
+  // --- Comments & Discussions ---
+  "comment.placeholder": "留下评论，支持 Markdown…",
+  "comment.submit": "评论",
+  "comment.submitting": "提交中…",
+  "comment.tab.write": "编写",
+  "comment.tab.preview": "预览",
+  "comment.preview.empty": "预览区域为空",
+  "comment.markdownHint": "支持 Markdown 格式",
+  "comment.firstHint": "或者直接写下第一条评论：",
+  "comment.empty": "暂无评论，来写第一条吧！",
+  "comment.count": "条评论",
+  "discussion.notEnabled.title": "Discussions 未开启",
+  "discussion.notEnabled.desc": "该仓库尚未开启 GitHub Discussions，无法使用评论和点赞功能。",
+  "discussion.notEnabled.hint": "如果你是管理员，可以前往仓库设置开启：",
+  "discussion.notEnabled.openSettings": "打开仓库设置 ↗",
+  "discussion.notEnabled.refresh": "已开启？点击刷新状态",
+  "discussion.noDiscussion.title": "暂无讨论",
+  "discussion.noDiscussion.desc": "该 Skill 还没有对应的 Discussion，创建后即可评论和点赞。",
+  "discussion.loading": "加载中…",
+  "discussion.loadingComments": "加载评论中…",
+  "discussion.create": "创建讨论",
+  "discussion.creating": "创建中…",
+  "discussion.viewOnGithub": "在 GitHub 查看 ↗",
+  "reaction.add": "添加表情",
+
+  // --- Navigation ---
+  "nav.workspace": "工作区",
+  "nav.personal": "个人",
+  "nav.tools": "工具",
+  "nav.skills": "Skills",
+  "nav.publishPrs": "发布 PR",
+  "nav.members": "成员",
+  "nav.activity": "动态",
+  "nav.subscriptions": "订阅",
+  "nav.local": "本地",
+  "nav.cli": "CLI",
+  "nav.collapse": "收起",
+
+  // --- Page titles & subtitles ---
+  "page.skills.title": "Skills",
+  "page.skills.subtitle": "浏览、订阅和检查当前工作区中的 skills。",
+  "page.publish.title": "发布",
+  "page.publish.subtitle": "跟踪发布 PR、策略检查、审核门控和自动合并结果。",
+  "page.members.title": "成员",
+  "page.members.subtitle": "邀请协作者并完成入职流程。",
+  "page.subscriptions.title": "订阅",
+  "page.subscriptions.subtitle": "查看你的订阅声明和更新策略。",
+  "page.installed.title": "本地 Skills",
+  "page.installed.subtitle": "切换各运行时使用的 skill，将本地 skill 推送到团队工作区。",
+  "page.activity.title": "动态",
+  "page.activity.subtitle": "查看 provider webhook 更新和同步轮询输入。",
+  "page.cli.title": "CLI",
+  "page.cli.subtitle": "从 Rust CLI 运行本地优先的 Team AI Hub 工作流。",
+
+  // --- Sidebar ---
+  "sidebar.notSignedIn": "未登录",
+  "sidebar.githubConnected": "GitHub 已连接",
+  "sidebar.clickToSignIn": "点击登录",
+
+  // --- Login ---
+  "login.title": "Team AI Hub",
+  "login.subtitle": "Git 驱动的 Skills 工作区",
+  "login.heading": "登录以继续",
+  "login.description": "通过 GitHub 登录以访问你的团队工作区和 skills。",
+  "login.browserWarning": "浏览器预览：",
+  "login.browserWarningDesc": "GitHub 登录仅在桌面应用中可用。运行",
+  "login.browserWarningEnd": "来启动。",
+  "login.continueWithGithub": "使用 GitHub 登录",
+  "login.useToken": "使用个人访问令牌",
+  "login.save": "保存",
+  "login.tokenHint": "令牌保存在系统钥匙串中，我们不会存储你的代码。",
+
+  // --- Settings ---
+  "settings.title": "设置",
+  "settings.general": "常规",
+  "settings.network": "网络",
+  "settings.cache": "缓存",
+  "settings.account": "账户",
+  "settings.about": "关于",
+  "settings.appearance": "外观",
+  "settings.appearance.desc": "选择应用的主题模式",
+  "settings.theme.system": "跟随系统",
+  "settings.theme.light": "浅色",
+  "settings.theme.dark": "深色",
+  "settings.accentColor": "重点色",
+  "settings.accentColor.desc": "界面主色调",
+  "settings.color.blue": "蓝色",
+  "settings.color.purple": "紫色",
+  "settings.color.green": "绿色",
+  "settings.color.orange": "橙色",
+  "settings.language": "语言",
+  "settings.language.desc": "界面显示语言",
+  "settings.language.auto": "自动检测",
+  "settings.proxy": "代理模式",
+  "settings.proxy.desc": "选择网络代理方式",
+  "settings.proxy.none": "不使用代理",
+  "settings.proxy.system": "系统代理",
+  "settings.proxy.custom": "自定义代理",
+  "settings.proxyUrl": "代理地址",
+  "settings.proxyUrl.desc": "HTTP/SOCKS5 代理 URL",
+  "settings.timeout": "请求超时",
+  "settings.timeout.desc": "API 请求超时时间（秒）",
+  "settings.githubAccount": "GitHub 账户",
+  "settings.connected": "已连接",
+  "settings.notConnected": "未连接",
+  "settings.scopes": "权限范围",
+  "settings.scopes.desc": "当前 token 的 GitHub scopes",
+  "settings.logout": "退出登录",
+  "settings.logout.desc": "清除本地凭据并返回登录页",
+  "settings.logout.btn": "退出",
+  "settings.version": "版本",
+  "settings.runtime": "运行时",
+  "settings.dataDir": "数据目录",
+  "settings.dataDir.open": "打开",
+  "settings.cache.totalSize": "总缓存大小",
+  "settings.cache.totalSize.desc": "SQLite 数据库中存储的文件树和文件内容",
+  "settings.cache.calculating": "计算中…",
+  "settings.cache.records": "条",
+  "settings.cache.byWorkspace": "按 Workspace 分布",
+  "settings.cache.recordCount": "条记录",
+  "settings.cache.noData": "暂无缓存数据",
+  "settings.cache.clearAll": "清除全部缓存",
+  "settings.cache.refresh": "刷新",
+  "settings.cache.clearWorkspace": "清除此 workspace 缓存",
+
+  // --- Subscribe Modal ---
+  "subscribe.title": "订阅",
+  "subscribe.installTo": "安装到运行时",
+  "subscribe.updatePolicy": "更新策略",
+  "subscribe.policy.autoPatch": "自动补丁",
+  "subscribe.policy.autoPatch.desc": "1.4.x 更新自动安装",
+  "subscribe.policy.autoMinor": "自动次版本",
+  "subscribe.policy.autoMinor.desc": "1.x 更新自动安装",
+  "subscribe.policy.manual": "手动",
+  "subscribe.policy.manual.desc": "通知我，但由我触发更新",
+  "subscribe.policy.pin": "锁定",
+  "subscribe.policy.pin.desc": "锁定到当前版本",
+  "subscribe.permissions": "安装时的权限",
+  "subscribe.cancel": "取消",
+  "subscribe.confirm": "订阅",
+
+  // --- Publish Modal ---
+  "publish.title": "发布",
+  "publish.version": "版本号",
+  "publish.releaseNotes": "发布说明",
+  "publish.releaseNotes.placeholder": "描述本次发布的内容变更…",
+  "publish.fileChanges": "文件变更",
+  "publish.loading": "正在加载变更…",
+  "publish.loadFailed": "加载 diff 失败",
+  "publish.noChanges": "没有检测到文件变更",
+  "publish.firstPublish": "首次发布，所有文件将被包含",
+  "publish.added": "新增",
+  "publish.removed": "删除",
+  "publish.modified": "修改",
+  "publish.cancel": "取消",
+  "publish.submit": "发布",
+  "publish.binaryNoPreview": "二进制文件，不支持预览 diff",
+  "publish.noDiff": "无文本 diff 数据",
+  "publish.imageLoading": "加载中…",
+  "publish.imageLoadFailed": "无法加载",
+
+  // --- Sync Modal ---
+  "sync.title": "同步到其他工作区",
+  "sync.source": "来源：",
+  "sync.targetWorkspace": "目标工作区",
+  "sync.noWriteAccess": "没有具有写入权限的工作区",
+  "sync.skillIdOptional": "目标中的 Skill ID（可选）",
+  "sync.previewRisk": "预览与风险",
+  "sync.prOpened": "Pull request 已创建",
+  "sync.openOnGithub": "在 GitHub 上查看",
+  "sync.cancel": "取消",
+  "sync.close": "关闭",
+  "sync.confirmOpenPr": "确认并创建 PR",
+  "sync.openPr": "创建 PR",
+
+  // --- Skill Detail ---
+  "skill.tab.source": "源码",
+  "skill.tab.metadata": "元数据",
+  "skill.tab.history": "历史",
+  "skill.tab.comments": "评论",
+  "skill.tab.risk": "风险",
+  "skill.loadingFile": "加载文件中…",
+  "skill.subscribe": "订阅",
+  "skill.install": "安装",
+  "skill.syncTo": "同步到…",
+  "skill.publish": "发布",
+  "skill.revert": "还原",
+  "skill.revert.confirm.title": "确认还原",
+  "skill.revert.confirm.desc": "将还原所有本地修改，恢复到原始内容。此操作不可撤销。",
+  "skill.revert.confirm.btn": "确认还原",
+  "skill.fullscreen": "全屏",
+  "skill.cancel": "取消",
+  "skill.confirm": "确认",
+  "skill.name": "名称",
+  "skill.description": "描述",
+  "skill.installReport": "安装报告",
+  "skill.publishPreview": "发布预览",
+  "skill.pdfNotAvailable": "PDF 预览不可用",
+  "skill.binaryFile": "二进制文件 — 无法内联显示。",
+
+  // --- Workspaces Page ---
+  "workspaces.localWorkspace": "本地工作区",
+  "workspaces.localBundles": "本地包",
+  "workspaces.filterSkills": "筛选 skills…",
+  "workspaces.scanning": "正在扫描工作区…",
+  "workspaces.skillCount": "个 skill",
+  "workspaces.skillCountPlural": "个 skills",
+  "workspaces.syncing": "拉取中…",
+  "workspaces.noSkills": "未找到 skills",
+  "workspaces.noSkills.desc": "调整筛选条件或选择其他工作区。",
+  "workspaces.pickSkill": "选择一个 skill",
+  "workspaces.pickSkill.desc": "在左侧选择一个 skill 来查看 README、编辑内容、查看历史或检查风险。",
+
+  // --- Local Page ---
+  "local.managed": "已管理的 Skills",
+  "local.activeIntegrations": "活跃集成",
+  "local.runtimesDetected": "检测到的运行时",
+  "local.importFromIde": "从 IDE 导入",
+  "local.refresh": "刷新",
+  "local.unmanaged": "发现的未托管 Skills",
+  "local.unmanaged.desc": "扫描本机 IDE 目录中发现的 skills…",
+  "local.scanning": "扫描中…",
+  "local.import": "导入",
+  "local.importAll": "全部导入",
+  "local.noUnmanaged": "没有发现未托管的 skills",
+  "local.managedSkills": "已管理的 Skills",
+  "local.managedSkills.desc": "切换开关来启用/禁用 skill…",
+  "local.refreshing": "刷新中…",
+  "local.noManaged": "暂无托管的 skills",
+  "local.modified": "已修改",
+  "local.actions": "操作",
+  "local.pushToWorkspace": "推送到工作区",
+
+  // --- Subscriptions Page ---
+  "subscriptions.title": "订阅",
+  "subscriptions.autoUpdating": "自动更新中",
+  "subscriptions.pinned": "已锁定",
+  "subscriptions.declarations": "订阅声明",
+  "subscriptions.empty": "暂无订阅",
+  "subscriptions.empty.desc": "打开工作区页面，选择一个 skill，然后点击订阅。",
+
+  // --- Activity Page ---
+  "activity.pickWorkspace": "选择一个工作区",
+  "activity.pushes": "推送",
+  "activity.prEvents": "PR 事件",
+  "activity.releases": "发布",
+
+  // --- Invitations Page ---
+  "invitations.incoming": "收到的邀请",
+  "invitations.members": "工作区成员",
+  "invitations.yourRole": "你的角色",
+
+  // --- Publish Page ---
+  "publishPage.pickWorkspace": "选择一个工作区",
+  "publishPage.selectWorkspace": "从选择器中选择一个工作区来查看其 Pull Requests。",
+  "publishPage.open": "打开",
+  "publishPage.merged": "已合并",
+  "publishPage.drafts": "草稿",
+  "publishPage.pullRequests": "Pull Requests",
+  "publishPage.loading": "加载中…",
+  "publishPage.fetchingPrs": "正在从 GitHub 获取 Pull Requests。",
+  "publishPage.noPrs": "没有{state} Pull Requests",
+  "publishPage.useSyncHint": "在 skill 上使用「同步到…」来创建一个。",
+  "publishPage.stateOpen": "打开的",
+  "publishPage.stateClosed": "已关闭的",
+  "publishPage.stateAll": "全部",
+
+  // --- Activity Page (extra) ---
+  "activity.selectWorkspace": "从选择器中选择一个工作区来查看最近动态。",
+  "activity.recentActivity": "最近动态",
+  "activity.loading": "加载中…",
+  "activity.fetchingEvents": "正在从 GitHub 获取事件。",
+  "activity.noActivity": "暂无最近动态",
+  "activity.noActivityDesc": "该工作区没有最近的推送、PR 或发布事件。",
+
+  // --- Invitations Page (extra) ---
+  "invitations.reposInvitedYou": "邀请你的仓库",
+  "invitations.reposInvitedYouSub": "来自 GitHub /user/repository_invitations 的实时数据",
+  "invitations.noInvitations": "GitHub 上没有待处理的仓库邀请。",
+  "invitations.inviteCollaborator": "邀请协作者",
+  "invitations.pickWorkspaceFirst": "请先选择一个工作区",
+  "invitations.usernamePlaceholder": "GitHub 用户名或邮箱",
+  "invitations.invite": "邀请",
+  "invitations.workspaceMembers": "工作区成员",
+  "invitations.workspaceMembersSub": "GitHub 协作者 · 角色继承自 provider",
+  "invitations.noCollaborators": "该工作区没有返回 GitHub 协作者。",
+  "invitations.invitedBy": "由 {name} 邀请",
+  "invitations.view": "查看",
+  "invitations.accept": "接受",
+  "invitations.expired": "已过期",
+  "invitations.invited": "已邀请",
+
+  // --- Risk Panel ---
+  "risk.overallRisk": "总体风险",
+  "risk.danger": "危险",
+  "risk.warning": "警告",
+  "risk.clean": "安全",
+  "risk.aiReview": "AI 风险审查",
+  "risk.aiReviewDesc": "将 skill manifest 和 SKILL.md 发送给语言模型进行自动化风险审计（权限滥用、密钥泄露、提示注入模式）。",
+  "risk.comingSoon": "即将推出",
+  "risk.staticAnalysis": "静态分析",
+  "risk.finding": "个发现",
+  "risk.findings": "个发现",
+  "risk.noIssues": "未检测到问题",
+  "risk.noIssuesDesc": "Manifest 未声明危险权限或已知风险模式。",
+
+  // --- Commits Timeline ---
+  "commits.pickSkill": "选择一个 skill",
+  "commits.selectSkill": "选择一个 skill 来查看其提交历史。",
+  "commits.commit": "次提交",
+  "commits.commits": "次提交",
+  "commits.touching": "涉及",
+  "commits.loading": "加载中…",
+  "commits.noCommits": "暂无提交",
+  "commits.noCommitsDesc": "该路径在所选 ref 上没有提交历史。",
+
+  // --- Activity Timeline ---
+  "timeline.noSkills": "未检测到 skills",
+  "timeline.noSkillsDesc": "选择一个包含 skills 的工作区 ref 来查看动态。",
+  "timeline.noTags": "暂无 git 标签",
+  "timeline.noTagsDesc": "在工作区仓库中打标签来填充时间线。",
+
+  // --- Workspace Picker ---
+  "picker.noMatches": "无匹配结果",
+  "picker.noWorkspaces": "暂无工作区",
+  "picker.addWorkspace": "添加工作区以开始同步 skills。",
+  "picker.addFromGithub": "从 GitHub 添加工作区…",
+
+  // --- Topbar ---
+  "topbar.refresh": "刷新",
+
+  // --- Skill Detail (extra) ---
+  "skill.confirmAction": "确认{action} · {risk}风险 · {permissions}",
+  "skill.riskConfirm.install": "安装",
+  "skill.riskConfirm.publish": "发布",
+
+  // --- Auth Dialog ---
+  "auth.account": "账户",
+  "auth.signedInAs": "已登录为 @{login}",
+  "auth.connectGithub": "连接你的 GitHub 身份",
+  "auth.signOut": "退出登录",
+  "auth.continueWithGithub": "使用 GitHub 登录",
+  "auth.useToken": "使用个人访问令牌",
+  "auth.save": "保存",
+
+  // --- Device Code Panel ---
+  "device.step1": "复制你的一次性代码",
+  "device.step2": "打开此 URL 并粘贴代码",
+  "device.copied": "已复制",
+  "device.copy": "复制",
+  "device.copyLink": "复制链接",
+  "device.open": "打开",
+
+  // --- CLI Page ---
+  "cli.rustCli": "Rust CLI",
+  "cli.rustCliDesc": "本地优先操作共享相同的 Rust 核心。",
+  "cli.cliHint": "所有命令在 stdout 输出 JSON，方便组合到脚本中。日志和提示输出到 stderr 以保持 stdout 机器可读。",
+  "cli.diagnostics": "诊断包",
+  "cli.export": "导出",
+  "cli.openLogs": "打开日志",
+  "cli.subscriptions": "订阅",
+  "cli.workspaces": "工作区",
+  "cli.logs": "日志",
+
+  // --- Subscriptions Page (extra) ---
+  "subscriptions.hint.synced": "从本地 subscriptions.yaml 同步",
+  "subscriptions.hint.manual": "手动 / 固定版本",
+  "subscriptions.entries": "{count} 条记录",
+
+  // --- Risk Panel (static analysis) ---
+  "risk.dangerousPerm": "危险权限：{perm}",
+  "risk.dangerousPerm.detail": "此权限可写入磁盘、执行 shell 命令或访问网络/密钥。",
+  "risk.elevatedPerm": "提升权限：{perm}",
+  "risk.elevatedPerm.detail": "有限的 shell 执行仍需审查捆绑脚本。",
+  "risk.noTargets": "未声明运行时目标",
+  "risk.noTargets.detail": "Skill 不会自动安装到任何位置。请声明至少一个目标。",
+  "risk.shortDesc": "描述过短",
+  "risk.shortDesc.detail": "用户难以发现此 Skill。建议扩展描述。",
+  "risk.authorDeclared": "作者声明风险：{level}",
+  "risk.authorDeclared.detail": "Skill 作者将此标记为高风险。",
+
+  // --- Rows ---
+  "rows.unknownSkill": "未知 Skill",
+  "rows.autoMerged": "自动合并",
+  "rows.manual": "手动",
+  "rows.githubCollaborator": "GitHub 协作者",
+  "rows.unknownRef": "未知引用",
+  "rows.noCommit": "无提交",
+  "rows.invited": "已邀请",
+
+  // --- RootLayout / Device Status ---
+  "device.idle": "空闲",
+  "device.waitingAuth": "等待 GitHub 授权",
+  "device.expired": "GitHub 设备码已过期",
+  "device.signedInAs": "已登录为 @{login}",
+  "device.slowDown": "等待中；GitHub 要求降低轮询频率至 {interval}s",
+
+  // --- Deep Link Banner ---
+  "deepLink.received": "收到深度链接",
+  "deepLink.subscribe": "订阅",
+  "deepLink.dismiss": "忽略",
+
+  // --- Error Banner ---
+  "error.requestFailed": "请求失败",
+
+  // --- Common ---
+  "common.cancel": "取消",
+  "common.confirm": "确认",
+  "common.close": "关闭",
+  "common.loading": "加载中…",
+  "common.save": "保存",
+  "common.delete": "删除",
+  "common.edit": "编辑",
+  "common.refresh": "刷新",
+};
+
+const en: Record<string, string> = {
+  // --- Comments & Discussions ---
+  "comment.placeholder": "Leave a comment, Markdown supported…",
+  "comment.submit": "Comment",
+  "comment.submitting": "Submitting…",
+  "comment.tab.write": "Write",
+  "comment.tab.preview": "Preview",
+  "comment.preview.empty": "Nothing to preview",
+  "comment.markdownHint": "Markdown is supported",
+  "comment.firstHint": "Or leave the first comment directly:",
+  "comment.empty": "No comments yet, be the first!",
+  "comment.count": "comments",
+  "discussion.notEnabled.title": "Discussions Not Enabled",
+  "discussion.notEnabled.desc": "GitHub Discussions is not enabled for this repo. Comments and reactions are unavailable.",
+  "discussion.notEnabled.hint": "If you're an admin, enable it in repo settings:",
+  "discussion.notEnabled.openSettings": "Open Repo Settings ↗",
+  "discussion.notEnabled.refresh": "Already enabled? Refresh",
+  "discussion.noDiscussion.title": "No Discussion Yet",
+  "discussion.noDiscussion.desc": "This Skill doesn't have a Discussion yet. Create one to start commenting.",
+  "discussion.loading": "Loading…",
+  "discussion.loadingComments": "Loading comments…",
+  "discussion.create": "Start Discussion",
+  "discussion.creating": "Creating…",
+  "discussion.viewOnGithub": "View on GitHub ↗",
+  "reaction.add": "Add reaction",
+
+  // --- Navigation ---
+  "nav.workspace": "Workspace",
+  "nav.personal": "Personal",
+  "nav.tools": "Tools",
+  "nav.skills": "Skills",
+  "nav.publishPrs": "Publish PRs",
+  "nav.members": "Members",
+  "nav.activity": "Activity",
+  "nav.subscriptions": "Subscriptions",
+  "nav.local": "Local",
+  "nav.cli": "CLI",
+  "nav.collapse": "Collapse",
+
+  // --- Page titles & subtitles ---
+  "page.skills.title": "Skills",
+  "page.skills.subtitle": "Browse, subscribe, and inspect skills in the active workspace.",
+  "page.publish.title": "Publish",
+  "page.publish.subtitle": "Track publish PRs, policy checks, review gates, and auto-merge outcomes.",
+  "page.members.title": "Members",
+  "page.members.subtitle": "Invite collaborators and complete onboarding.",
+  "page.subscriptions.title": "Subscriptions",
+  "page.subscriptions.subtitle": "Review your subscription declarations and update strategy.",
+  "page.installed.title": "Local Skills",
+  "page.installed.subtitle": "Toggle which runtimes use each skill, push local skills to a team workspace.",
+  "page.activity.title": "Activity",
+  "page.activity.subtitle": "Review provider webhook updates and sync polling inputs.",
+  "page.cli.title": "CLI",
+  "page.cli.subtitle": "Run local-first Team AI Hub workflows from the Rust CLI.",
+
+  // --- Sidebar ---
+  "sidebar.notSignedIn": "Not signed in",
+  "sidebar.githubConnected": "GitHub connected",
+  "sidebar.clickToSignIn": "Click to sign in",
+
+  // --- Login ---
+  "login.title": "Team AI Hub",
+  "login.subtitle": "Git-backed skills workspace",
+  "login.heading": "Sign in to continue",
+  "login.description": "Continue with GitHub to access your team workspaces and skills.",
+  "login.browserWarning": "Browser preview:",
+  "login.browserWarningDesc": "GitHub sign-in only works inside the desktop app. Run",
+  "login.browserWarningEnd": "to launch it.",
+  "login.continueWithGithub": "Continue with GitHub",
+  "login.useToken": "Use a personal access token instead",
+  "login.save": "Save",
+  "login.tokenHint": "Tokens stay in your OS keychain. We never store your code.",
+
+  // --- Settings ---
+  "settings.title": "Settings",
+  "settings.general": "General",
+  "settings.network": "Network",
+  "settings.cache": "Cache",
+  "settings.account": "Account",
+  "settings.about": "About",
+  "settings.appearance": "Appearance",
+  "settings.appearance.desc": "Choose the app theme mode",
+  "settings.theme.system": "System",
+  "settings.theme.light": "Light",
+  "settings.theme.dark": "Dark",
+  "settings.accentColor": "Accent color",
+  "settings.accentColor.desc": "Primary UI color",
+  "settings.color.blue": "Blue",
+  "settings.color.purple": "Purple",
+  "settings.color.green": "Green",
+  "settings.color.orange": "Orange",
+  "settings.language": "Language",
+  "settings.language.desc": "Display language",
+  "settings.language.auto": "Auto detect",
+  "settings.proxy": "Proxy mode",
+  "settings.proxy.desc": "Choose network proxy method",
+  "settings.proxy.none": "No proxy",
+  "settings.proxy.system": "System proxy",
+  "settings.proxy.custom": "Custom proxy",
+  "settings.proxyUrl": "Proxy URL",
+  "settings.proxyUrl.desc": "HTTP/SOCKS5 proxy URL",
+  "settings.timeout": "Request timeout",
+  "settings.timeout.desc": "API request timeout (seconds)",
+  "settings.githubAccount": "GitHub account",
+  "settings.connected": "Connected",
+  "settings.notConnected": "Not connected",
+  "settings.scopes": "Scopes",
+  "settings.scopes.desc": "Current token GitHub scopes",
+  "settings.logout": "Sign out",
+  "settings.logout.desc": "Clear local credentials and return to login",
+  "settings.logout.btn": "Sign out",
+  "settings.version": "Version",
+  "settings.runtime": "Runtime",
+  "settings.dataDir": "Data directory",
+  "settings.dataDir.open": "Open",
+  "settings.cache.totalSize": "Total cache size",
+  "settings.cache.totalSize.desc": "File trees and content stored in SQLite database",
+  "settings.cache.calculating": "Calculating…",
+  "settings.cache.records": "records",
+  "settings.cache.byWorkspace": "By workspace",
+  "settings.cache.recordCount": "records",
+  "settings.cache.noData": "No cache data",
+  "settings.cache.clearAll": "Clear all cache",
+  "settings.cache.refresh": "Refresh",
+  "settings.cache.clearWorkspace": "Clear this workspace cache",
+
+  // --- Subscribe Modal ---
+  "subscribe.title": "Subscribe to",
+  "subscribe.installTo": "Install to runtimes",
+  "subscribe.updatePolicy": "Update policy",
+  "subscribe.policy.autoPatch": "Auto patch",
+  "subscribe.policy.autoPatch.desc": "1.4.x updates land automatically",
+  "subscribe.policy.autoMinor": "Auto minor",
+  "subscribe.policy.autoMinor.desc": "1.x updates land automatically",
+  "subscribe.policy.manual": "Manual",
+  "subscribe.policy.manual.desc": "Notify me, but I'll trigger updates",
+  "subscribe.policy.pin": "Pin",
+  "subscribe.policy.pin.desc": "Lock to the current version",
+  "subscribe.permissions": "Permissions on install",
+  "subscribe.cancel": "Cancel",
+  "subscribe.confirm": "Subscribe",
+
+  // --- Publish Modal ---
+  "publish.title": "Publish",
+  "publish.version": "Version",
+  "publish.releaseNotes": "Release notes",
+  "publish.releaseNotes.placeholder": "Describe the changes in this release…",
+  "publish.fileChanges": "File changes",
+  "publish.loading": "Loading changes…",
+  "publish.loadFailed": "Failed to load diff",
+  "publish.noChanges": "No file changes detected",
+  "publish.firstPublish": "First publish — all files will be included",
+  "publish.added": "Added",
+  "publish.removed": "Removed",
+  "publish.modified": "Modified",
+  "publish.cancel": "Cancel",
+  "publish.submit": "Publish",
+  "publish.binaryNoPreview": "Binary file, diff preview not supported",
+  "publish.noDiff": "No text diff data",
+  "publish.imageLoading": "Loading…",
+  "publish.imageLoadFailed": "Failed to load",
+
+  // --- Sync Modal ---
+  "sync.title": "Sync to another workspace",
+  "sync.source": "Source:",
+  "sync.targetWorkspace": "Target workspace",
+  "sync.noWriteAccess": "No workspaces with write access",
+  "sync.skillIdOptional": "Skill ID in target (optional)",
+  "sync.previewRisk": "Preview & risk",
+  "sync.prOpened": "Pull request opened",
+  "sync.openOnGithub": "Open on GitHub",
+  "sync.cancel": "Cancel",
+  "sync.close": "Close",
+  "sync.confirmOpenPr": "Confirm & open PR",
+  "sync.openPr": "Open PR",
+
+  // --- Skill Detail ---
+  "skill.tab.source": "Source",
+  "skill.tab.metadata": "Metadata",
+  "skill.tab.history": "History",
+  "skill.tab.comments": "Comments",
+  "skill.tab.risk": "Risk",
+  "skill.loadingFile": "Loading file…",
+  "skill.subscribe": "Subscribe",
+  "skill.install": "Install",
+  "skill.syncTo": "Sync to…",
+  "skill.publish": "Publish",
+  "skill.revert": "Revert",
+  "skill.revert.confirm.title": "Confirm Revert",
+  "skill.revert.confirm.desc": "This will revert all local modifications back to the original content. This action cannot be undone.",
+  "skill.revert.confirm.btn": "Confirm Revert",
+  "skill.fullscreen": "Fullscreen",
+  "skill.cancel": "Cancel",
+  "skill.confirm": "Confirm",
+  "skill.name": "Name",
+  "skill.description": "Description",
+  "skill.installReport": "Install report",
+  "skill.publishPreview": "Publish preview",
+  "skill.pdfNotAvailable": "PDF preview not available",
+  "skill.binaryFile": "Binary file — cannot display inline.",
+
+  // --- Workspaces Page ---
+  "workspaces.localWorkspace": "Local workspace",
+  "workspaces.localBundles": "local bundles",
+  "workspaces.filterSkills": "Filter skills…",
+  "workspaces.scanning": "Scanning workspace…",
+  "workspaces.skillCount": "skill",
+  "workspaces.skillCountPlural": "skills",
+  "workspaces.syncing": "Fetching…",
+  "workspaces.noSkills": "No skills found",
+  "workspaces.noSkills.desc": "Adjust the filter or pick a different workspace.",
+  "workspaces.pickSkill": "Pick a skill",
+  "workspaces.pickSkill.desc": "Select a skill on the left to see its README, edit content, view history, or check risk.",
+
+  // --- Local Page ---
+  "local.managed": "Skills managed",
+  "local.activeIntegrations": "Active integrations",
+  "local.runtimesDetected": "Runtimes detected",
+  "local.importFromIde": "Import from IDE",
+  "local.refresh": "Refresh",
+  "local.unmanaged": "Unmanaged skills discovered",
+  "local.unmanaged.desc": "Scanning local IDE directories for skills…",
+  "local.scanning": "Scanning…",
+  "local.import": "Import",
+  "local.importAll": "Import all",
+  "local.noUnmanaged": "No unmanaged skills found",
+  "local.managedSkills": "Managed Skills",
+  "local.managedSkills.desc": "Toggle switches to enable/disable skills…",
+  "local.refreshing": "Refreshing…",
+  "local.noManaged": "No managed skills yet",
+  "local.modified": "Modified",
+  "local.actions": "Actions",
+  "local.pushToWorkspace": "Push to workspace",
+
+  // --- Subscriptions Page ---
+  "subscriptions.title": "Subscriptions",
+  "subscriptions.autoUpdating": "Auto updating",
+  "subscriptions.pinned": "Pinned",
+  "subscriptions.declarations": "Subscription declarations",
+  "subscriptions.empty": "No subscriptions yet",
+  "subscriptions.empty.desc": "Open the Workspaces page, pick a skill, then hit Subscribe.",
+
+  // --- Activity Page ---
+  "activity.pickWorkspace": "Pick a workspace",
+  "activity.pushes": "Pushes",
+  "activity.prEvents": "PR events",
+  "activity.releases": "Releases",
+
+  // --- Invitations Page ---
+  "invitations.incoming": "Incoming invites",
+  "invitations.members": "Workspace members",
+  "invitations.yourRole": "Your role",
+
+  // --- Publish Page ---
+  "publishPage.pickWorkspace": "Pick a workspace",
+  "publishPage.selectWorkspace": "Select a workspace from the picker to see its pull requests.",
+  "publishPage.open": "Open",
+  "publishPage.merged": "Merged",
+  "publishPage.drafts": "Drafts",
+  "publishPage.pullRequests": "Pull requests",
+  "publishPage.loading": "Loading…",
+  "publishPage.fetchingPrs": "Fetching pull requests from GitHub.",
+  "publishPage.noPrs": "No {state} pull requests",
+  "publishPage.useSyncHint": "Use Sync to… on a skill to open one.",
+  "publishPage.stateOpen": "open",
+  "publishPage.stateClosed": "closed",
+  "publishPage.stateAll": "all",
+
+  // --- Activity Page (extra) ---
+  "activity.selectWorkspace": "Select a workspace from the picker to see recent activity.",
+  "activity.recentActivity": "Recent activity",
+  "activity.loading": "Loading…",
+  "activity.fetchingEvents": "Fetching events from GitHub.",
+  "activity.noActivity": "No recent activity",
+  "activity.noActivityDesc": "This workspace has no recent push, PR, or release events.",
+
+  // --- Invitations Page (extra) ---
+  "invitations.reposInvitedYou": "Repos that invited you",
+  "invitations.reposInvitedYouSub": "Live from GitHub /user/repository_invitations",
+  "invitations.noInvitations": "No pending repository invitations on GitHub.",
+  "invitations.inviteCollaborator": "Invite collaborator",
+  "invitations.pickWorkspaceFirst": "Pick a workspace first",
+  "invitations.usernamePlaceholder": "GitHub username or email",
+  "invitations.invite": "Invite",
+  "invitations.workspaceMembers": "Workspace members",
+  "invitations.workspaceMembersSub": "Live GitHub collaborators · roles inherited from the provider",
+  "invitations.noCollaborators": "No GitHub collaborators returned for this workspace.",
+  "invitations.invitedBy": "Invited by {name}",
+  "invitations.view": "View",
+  "invitations.accept": "Accept",
+  "invitations.expired": "expired",
+  "invitations.invited": "Invited",
+
+  // --- Risk Panel ---
+  "risk.overallRisk": "Overall risk",
+  "risk.danger": "danger",
+  "risk.warning": "warning",
+  "risk.clean": "clean",
+  "risk.aiReview": "AI risk review",
+  "risk.aiReviewDesc": "Send the skill manifest and SKILL.md to a language model for an automated risk audit (permission misuse, secret leakage, prompt injection patterns).",
+  "risk.comingSoon": "Coming soon",
+  "risk.staticAnalysis": "Static analysis",
+  "risk.finding": "finding",
+  "risk.findings": "findings",
+  "risk.noIssues": "No issues detected",
+  "risk.noIssuesDesc": "Manifest declares no dangerous permissions or known risky patterns.",
+
+  // --- Commits Timeline ---
+  "commits.pickSkill": "Pick a skill",
+  "commits.selectSkill": "Select a skill to see its commit history.",
+  "commits.commit": "commit",
+  "commits.commits": "commits",
+  "commits.touching": "touching",
+  "commits.loading": "Loading…",
+  "commits.noCommits": "No commits yet",
+  "commits.noCommitsDesc": "This path has no commit history on the selected ref.",
+
+  // --- Activity Timeline ---
+  "timeline.noSkills": "No skills detected",
+  "timeline.noSkillsDesc": "Pick a workspace ref with bundled skills to see activity.",
+  "timeline.noTags": "No git tags yet",
+  "timeline.noTagsDesc": "Tag a release in the workspace repo to populate the timeline.",
+
+  // --- Workspace Picker ---
+  "picker.noMatches": "No matches",
+  "picker.noWorkspaces": "No workspaces yet",
+  "picker.addWorkspace": "Add a workspace to start syncing skills.",
+  "picker.addFromGithub": "Add workspace from GitHub…",
+
+  // --- Topbar ---
+  "topbar.refresh": "Refresh",
+
+  // --- Skill Detail (extra) ---
+  "skill.confirmAction": "Confirm {action} · {risk} risk · {permissions}",
+  "skill.riskConfirm.install": "install",
+  "skill.riskConfirm.publish": "publish",
+
+  // --- Auth Dialog ---
+  "auth.account": "Account",
+  "auth.signedInAs": "Signed in as @{login}",
+  "auth.connectGithub": "Connect your GitHub identity",
+  "auth.signOut": "Sign out",
+  "auth.continueWithGithub": "Continue with GitHub",
+  "auth.useToken": "Use a personal access token instead",
+  "auth.save": "Save",
+
+  // --- Device Code Panel ---
+  "device.step1": "Copy your one-time code",
+  "device.step2": "Open this URL and paste the code",
+  "device.copied": "Copied",
+  "device.copy": "Copy",
+  "device.copyLink": "Copy link",
+  "device.open": "Open",
+
+  // --- CLI Page ---
+  "cli.rustCli": "Rust CLI",
+  "cli.rustCliDesc": "Local-first operations share the same Rust core.",
+  "cli.cliHint": "All commands surface JSON on stdout so you can compose them into scripts. Logs and prompts go to stderr to keep stdout machine-readable.",
+  "cli.diagnostics": "Diagnostics bundle",
+  "cli.export": "Export",
+  "cli.openLogs": "Open logs",
+  "cli.subscriptions": "Subscriptions",
+  "cli.workspaces": "Workspaces",
+  "cli.logs": "Logs",
+
+  // --- Subscriptions Page (extra) ---
+  "subscriptions.hint.synced": "Synced from local subscriptions.yaml",
+  "subscriptions.hint.manual": "Manual / pinned versions",
+  "subscriptions.entries": "{count} entries",
+
+  // --- Risk Panel (static analysis) ---
+  "risk.dangerousPerm": "Dangerous permission: {perm}",
+  "risk.dangerousPerm.detail": "This permission can write to disk, run shell commands, or access network/secrets.",
+  "risk.elevatedPerm": "Elevated permission: {perm}",
+  "risk.elevatedPerm.detail": "Limited shell execution still warrants review of bundled scripts.",
+  "risk.noTargets": "No runtime targets declared",
+  "risk.noTargets.detail": "Skill won't auto-install anywhere. Declare at least one target.",
+  "risk.shortDesc": "Description is very short",
+  "risk.shortDesc.detail": "Hard for users to discover the skill. Consider expanding it.",
+  "risk.authorDeclared": "Author-declared risk: {level}",
+  "risk.authorDeclared.detail": "The skill author flagged this as elevated risk.",
+
+  // --- Rows ---
+  "rows.unknownSkill": "Unknown skill",
+  "rows.autoMerged": "auto merged",
+  "rows.manual": "manual",
+  "rows.githubCollaborator": "GitHub collaborator",
+  "rows.unknownRef": "unknown ref",
+  "rows.noCommit": "no commit",
+  "rows.invited": "invited",
+
+  // --- RootLayout / Device Status ---
+  "device.idle": "Idle",
+  "device.waitingAuth": "Waiting for GitHub authorization",
+  "device.expired": "GitHub device code expired",
+  "device.signedInAs": "Signed in as @{login}",
+  "device.slowDown": "Waiting; GitHub asked to slow polling to {interval}s",
+
+  // --- Deep Link Banner ---
+  "deepLink.received": "Deep link received",
+  "deepLink.subscribe": "Subscribe",
+  "deepLink.dismiss": "Dismiss",
+
+  // --- Error Banner ---
+  "error.requestFailed": "Request failed",
+
+  // --- Common ---
+  "common.cancel": "Cancel",
+  "common.confirm": "Confirm",
+  "common.close": "Close",
+  "common.loading": "Loading…",
+  "common.save": "Save",
+  "common.delete": "Delete",
+  "common.edit": "Edit",
+  "common.refresh": "Refresh",
+};
+
+// ---------------------------------------------------------------------------
+// Detect language
+// ---------------------------------------------------------------------------
+
+function getLanguageSetting(): AppSettings["language"] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return parsed.language ?? "auto";
+    }
+  } catch { /* ignore */ }
+  return "auto";
+}
+
+function resolveLocale(setting: AppSettings["language"]): "zh" | "en" {
+  if (setting === "zh-CN") return "zh";
+  if (setting === "en") return "en";
+  // auto: detect from browser
+  const lang = navigator.language || "";
+  return lang.startsWith("zh") ? "zh" : "en";
+}
+
+// ---------------------------------------------------------------------------
+// External store (reacts to settings changes)
+// ---------------------------------------------------------------------------
+
+let currentLocale = resolveLocale(getLanguageSetting());
+const listeners = new Set<() => void>();
+
+function subscribe(cb: () => void) {
+  listeners.add(cb);
+  return () => { listeners.delete(cb); };
+}
+
+window.addEventListener("teamai-settings-changed", () => {
+  currentLocale = resolveLocale(getLanguageSetting());
+  listeners.forEach((cb) => cb());
+});
+
+window.addEventListener("storage", () => {
+  currentLocale = resolveLocale(getLanguageSetting());
+  listeners.forEach((cb) => cb());
+});
+
+// ---------------------------------------------------------------------------
+// Hook
+// ---------------------------------------------------------------------------
+
+export function useLocale() {
+  const locale = useSyncExternalStore(subscribe, () => currentLocale);
+  const dict = locale === "zh" ? zh : en;
+
+  function t(key: string): string {
+    return dict[key] ?? key;
+  }
+
+  return { locale, t };
+}

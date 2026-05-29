@@ -1,0 +1,25 @@
+{
+  "name": "team-ai-hub",
+  "private": true,
+  "packageManager": "pnpm@9.15.4",
+  "scripts": {
+    "build": "pnpm -r build",
+    "check": "pnpm -r check",
+    "demo:create-repo": "scripts/create-demo-skills-repo.sh",
+    "demo:push-update": "scripts/push-demo-update.sh",
+    "demo:real-provider": "scripts/demo-real-provider.sh --execute",
+    "demo:real-provider:dry-run": "scripts/demo-real-provider.sh --dry-run",
+    "demo:verify-evidence": "scripts/verify-demo-evidence.sh",
+    "dev": "pnpm --filter @teamai/desktop tauri dev",
+    "dev:web": "pnpm --filter @teamai/desktop dev",
+    "lint": "pnpm -r lint",
+    "smoke:cli-keypath": "scripts/smoke-cli-keypath.sh",
+    "smoke:diagnostics": "scripts/smoke-diagnostics.sh",
+    "smoke:rollback": "scripts/smoke-rollback.sh",
+    "test": "cargo test --workspace && pnpm -r test"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}

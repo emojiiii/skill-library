@@ -1,0 +1,3696 @@
+mod db;
+
+use serde::Serialize;
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
+use base64::Engine as _;
+use tauri::{Emitter, Manager};
+use tauri_plugin_opener::OpenerExt;
+use teamai_core::{AppPaths, GitHubCredential, WorkspaceRef};
+use teamai_installer::{InstallMetadata, InstallOptions, InstallReport, TargetRoot};
+use teamai_manifest::{effective_risk, SemanticChange, SkillAsset};
+use teamai_provider::{
+    ChangedFile, GitRef, Invitation, InvitationInput, Member, PageOpts, PermissionLevel, Provider,
+    Workspace,
+};
+use teamai_provider_github::{
+    scan::{SkillDetailScan, WorkspaceDetailScan},
+    CommitSummary, GitHubProvider, GitHubPublishFile, GitHubPublishInput, PullRequestQueryState,
+    PullRequestSummary, RepositoryEvent, RepositoryInvitation,
+};
+use teamai_publish::{PublishPackage, PublishPolicyResult, PublishRequestSummary};
+use teamai_sync::{
+    RemoteWorkspaceSkills, StoredWorkspace, Subscription, SubscriptionsFile, TargetSelection,
+    WorkspaceWebhookRegistration, WorkspacesFile,
+};
+use url::Url;
+
+const DEEP_LINK_EVENT: &str = "teamai://deep-link";
+const DEEP_LINK_SUBSCRIBE_PATH: &str = "subscribe";
+const GITHUB_DEVICE_SCOPES: &[&str] = &["repo", "read:org", "read:user"];
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeepLinkPayload {
+    url: String,
+    action: String,
+    workspace: Option<WorkspaceRef>,
+    asset_id: Option<String>,
+    version: Option<String>,
+    targets: Vec<String>,
+    query: HashMap<String, String>,
+}
+
+#[derive(Default)]
+struct DeepLinkState {
+    last: Mutex<Option<DeepLinkPayload>>,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum CommandError {
+    #[error("{0}")]
+    Message(String),
+    #[error("{message}")]
+    Coded { code: &'static str, message: String },
+}
+
+impl CommandError {
+    fn coded(code: &'static str, message: impl Into<String>) -> Self {
+        Self::Coded {
+            code,
+            message: message.into(),
+        }
+    }
+
+    fn code(&self) -> &'static str {
+        match self {
+            Self::Message(_) => "command_error",
+            Self::Coded { code, .. } => code,
+        }
+    }
+
+    fn message(&self) -> &str {
+        match self {
+            Self::Message(message) => message,
+            Self::Coded { message, .. } => message,
+        }
+    }
+}
+
+impl serde::Serialize for CommandError {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[derive(Serialize)]
+        struct CommandErrorBody<'a> {
+            code: &'static str,
+            message: &'a str,
+        }
+
+        CommandErrorBody {
+            code: self.code(),
+            message: self.message(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl From<teamai_core::TeamAIError> for CommandError {
+    fn from(value: teamai_core::TeamAIError) -> Self {
+        Self::coded("core_error", value.to_string())
+    }
+}
+
+impl From<teamai_manifest::ManifestError> for CommandError {
+    fn from(value: teamai_manifest::ManifestError) -> Self {
+        Self::coded("manifest_error", value.to_string())
+    }
+}
+
+impl From<teamai_installer::InstallerError> for CommandError {
+    fn from(value: teamai_installer::InstallerError) -> Self {
+        Self::coded("installer_error", value.to_string())
+    }
+}
+
+impl From<teamai_sync::SyncError> for CommandError {
+    fn from(value: teamai_sync::SyncError) -> Self {
+        Self::coded("sync_error", value.to_string())
+    }
+}
+
+impl From<teamai_publish::PublishError> for CommandError {
+    fn from(value: teamai_publish::PublishError) -> Self {
+        Self::coded("publish_error", value.to_string())
+    }
+}
+
+impl From<std::io::Error> for CommandError {
+    fn from(value: std::io::Error) -> Self {
+        Self::coded("io_error", value.to_string())
+    }
+}
+
+impl From<serde_json::Error> for CommandError {
+    fn from(value: serde_json::Error) -> Self {
+        Self::coded("json_error", value.to_string())
+    }
+}
+
+type CommandResult<T> = Result<T, CommandError>;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppStateSummary {
+    home: PathBuf,
+    config: PathBuf,
+    subscriptions: PathBuf,
+    workspaces: PathBuf,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishPreview {
+    package: PublishPackage,
+    policy: PublishPolicyResult,
+    request: Option<PublishRequestSummary>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishResult {
+    package: PublishPackage,
+    policy: PublishPolicyResult,
+    request: PublishRequestSummary,
+    pull_request: teamai_provider::PullRequest,
+    target_workspace: String,
+    uploaded_files: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagnosticsExport {
+    exported_at: String,
+    output_dir: PathBuf,
+    app_home: PathBuf,
+    subscriptions: usize,
+    workspaces: usize,
+    logs: Vec<PathBuf>,
+    notes: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InstalledTargetGroup {
+    target: String,
+    skills: Vec<InstallMetadata>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalAgentRoot {
+    id: String,
+    label: String,
+    kind: String,
+    path: PathBuf,
+    exists: bool,
+    entries: Vec<LocalAgentEntry>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalAgentEntry {
+    id: String,
+    name: String,
+    path: PathBuf,
+    has_manifest: bool,
+    has_skill_md: bool,
+    managed: bool,
+    version: Option<String>,
+    description: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkspaceSkillsResponse {
+    workspace: Workspace,
+    skills: Vec<SkillAsset>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthStatus {
+    github_login: Option<String>,
+    github_scopes: Vec<String>,
+    credential_store: String,
+    warning: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitHubLoginResult {
+    login: String,
+    scopes: Vec<String>,
+    credential_store: String,
+    warning: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitHubDeviceStartResult {
+    client_id: String,
+    device_code: String,
+    user_code: String,
+    verification_uri: String,
+    verification_uri_complete: Option<String>,
+    expires_at: u64,
+    interval: u64,
+    scopes: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+enum GitHubDevicePollResult {
+    Pending,
+    SlowDown { interval: u64 },
+    Authorized { login: GitHubLoginResult },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillComparison {
+    workspace: WorkspaceRef,
+    skill_path: String,
+    from: String,
+    to: String,
+    files: Vec<ChangedFile>,
+    semantic: Vec<SemanticChange>,
+}
+
+#[tauri::command]
+fn app_init() -> CommandResult<AppStateSummary> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    Ok(AppStateSummary {
+        home: paths.home,
+        config: paths.config,
+        subscriptions: paths.subscriptions,
+        workspaces: paths.workspaces,
+    })
+}
+
+#[tauri::command]
+fn get_deep_link_state(app: tauri::AppHandle) -> CommandResult<Option<DeepLinkPayload>> {
+    Ok(app.state::<DeepLinkState>().last.lock().unwrap().clone())
+}
+
+#[tauri::command]
+fn scan_workspace(path: String) -> CommandResult<Vec<SkillAsset>> {
+    Ok(teamai_manifest::scan_workspace(path)?)
+}
+
+#[tauri::command]
+fn get_auth_status() -> CommandResult<AuthStatus> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let github = teamai_core::load_github_credential(&paths.credentials)?;
+    let credential_store = teamai_core::keychain_store_name().to_owned();
+    let (github_login, github_scopes, warning) = match github {
+        Some(github) => (
+            github.login,
+            github.scopes,
+            Some(credential_warning(&paths, &credential_store)),
+        ),
+        None => (None, Vec::new(), None),
+    };
+    Ok(AuthStatus {
+        github_login,
+        github_scopes,
+        credential_store: credential_store.clone(),
+        warning,
+    })
+}
+
+fn credential_warning(paths: &AppPaths, credential_store: &str) -> String {
+    match credential_store {
+        "os-keychain" => format!(
+            "GitHub token is stored in the OS keychain; {} keeps only non-sensitive login metadata.",
+            paths.credentials.display()
+        ),
+        _ => format!(
+            "GitHub token is stored in the active keyring backend; {} keeps only non-sensitive login metadata.",
+            paths.credentials.display()
+        ),
+    }
+}
+
+#[tauri::command]
+async fn login_github_token(token: String) -> CommandResult<GitHubLoginResult> {
+    let token = token.trim().to_owned();
+    if token.is_empty() {
+        return Err(CommandError::coded(
+            "missing_github_token",
+            "GitHub token is required",
+        ));
+    }
+
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let provider = GitHubProvider::new(token.clone()).map_err(provider_command_error)?;
+    let info = provider
+        .validate_token()
+        .await
+        .map_err(provider_command_error)?;
+    teamai_core::save_github_credential(
+        &paths.credentials,
+        GitHubCredential {
+            token,
+            login: Some(info.user.login.clone()),
+            scopes: info.scopes.clone(),
+        },
+    )?;
+    let credential_store = teamai_core::keychain_store_name().to_owned();
+
+    Ok(GitHubLoginResult {
+        login: info.user.login,
+        scopes: info.scopes,
+        credential_store: credential_store.clone(),
+        warning: credential_warning(&paths, &credential_store),
+    })
+}
+
+#[tauri::command]
+async fn start_github_device_flow(
+    client_id: Option<String>,
+) -> CommandResult<GitHubDeviceStartResult> {
+    let client_id = resolve_github_client_id(client_id)?;
+    let device = GitHubProvider::start_device_flow(&client_id, GITHUB_DEVICE_SCOPES)
+        .await
+        .map_err(provider_command_error)?;
+    let expires_at = current_unix_secs().saturating_add(device.expires_in);
+    Ok(GitHubDeviceStartResult {
+        client_id,
+        device_code: device.device_code,
+        user_code: device.user_code,
+        verification_uri: device.verification_uri,
+        verification_uri_complete: device.verification_uri_complete,
+        expires_at,
+        interval: device.interval.max(1),
+        scopes: GITHUB_DEVICE_SCOPES
+            .iter()
+            .map(|scope| (*scope).to_owned())
+            .collect(),
+    })
+}
+
+#[tauri::command]
+async fn poll_github_device_flow(
+    client_id: String,
+    device_code: String,
+) -> CommandResult<GitHubDevicePollResult> {
+    let client_id = client_id.trim().to_owned();
+    let device_code = device_code.trim().to_owned();
+    if client_id.is_empty() || device_code.is_empty() {
+        return Err(CommandError::coded(
+            "missing_device_session",
+            "GitHub device flow session is missing",
+        ));
+    }
+
+    let response = GitHubProvider::poll_device_flow(&client_id, &device_code)
+        .await
+        .map_err(provider_command_error)?;
+    if let Some(token) = response.access_token {
+        let paths = AppPaths::resolve()?;
+        teamai_sync::ensure_local_state(&paths)?;
+        let provider = GitHubProvider::new(token.clone()).map_err(provider_command_error)?;
+        let info = provider
+            .validate_token()
+            .await
+            .map_err(provider_command_error)?;
+        teamai_core::save_github_credential(
+            &paths.credentials,
+            GitHubCredential {
+                token,
+                login: Some(info.user.login.clone()),
+                scopes: info.scopes.clone(),
+            },
+        )?;
+        let credential_store = teamai_core::keychain_store_name().to_owned();
+        return Ok(GitHubDevicePollResult::Authorized {
+            login: GitHubLoginResult {
+                login: info.user.login,
+                scopes: info.scopes,
+                credential_store: credential_store.clone(),
+                warning: credential_warning(&paths, &credential_store),
+            },
+        });
+    }
+
+    match response.error.as_deref() {
+        Some("authorization_pending") | None => Ok(GitHubDevicePollResult::Pending),
+        Some("slow_down") => Ok(GitHubDevicePollResult::SlowDown { interval: 5 }),
+        Some("expired_token") => Err(CommandError::coded(
+            "github_device_expired",
+            "GitHub device code expired",
+        )),
+        Some("access_denied") => Err(CommandError::coded(
+            "github_device_access_denied",
+            "GitHub device authorization was cancelled",
+        )),
+        Some(error) => Err(CommandError::coded(
+            "github_device_error",
+            response
+                .error_description
+                .unwrap_or_else(|| error.to_owned()),
+        )),
+    }
+}
+
+#[tauri::command]
+fn list_workspaces() -> CommandResult<WorkspacesFile> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    Ok(teamai_sync::read_workspaces(&paths.workspace_registry)?)
+}
+
+#[tauri::command]
+async fn add_workspace(
+    workspace: String,
+    token: Option<String>,
+    webhook_url: Option<String>,
+    webhook_secret: Option<String>,
+    webhook_events: Option<Vec<String>>,
+) -> CommandResult<StoredWorkspace> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let workspace = parse_workspace(&workspace)?;
+    let token = token.or_else(|| saved_github_token(&paths));
+    let webhook = workspace_webhook_registration(webhook_url, webhook_secret, webhook_events)?;
+    Ok(teamai_sync::add_github_workspace_with_webhook(
+        &paths.workspace_registry,
+        &workspace,
+        token.as_deref(),
+        webhook,
+    )
+    .await?)
+}
+
+#[tauri::command]
+async fn scan_github_workspace(
+    workspace: String,
+    token: Option<String>,
+) -> CommandResult<WorkspaceSkillsResponse> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let workspace = parse_workspace(&workspace)?;
+    let token = token.or_else(|| saved_github_token(&paths));
+    let remote: RemoteWorkspaceSkills =
+        teamai_sync::scan_github_workspace_skills(&workspace, token.as_deref()).await?;
+    Ok(WorkspaceSkillsResponse {
+        workspace: remote.workspace,
+        skills: remote.skills,
+    })
+}
+
+#[tauri::command]
+async fn get_workspace_detail(
+    workspace: String,
+    token: Option<String>,
+) -> CommandResult<WorkspaceDetailScan> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let workspace = parse_workspace(&workspace)?;
+    let token = token.or_else(|| saved_github_token(&paths));
+    Ok(teamai_sync::scan_github_workspace_detail(&workspace, token.as_deref()).await?)
+}
+
+#[tauri::command]
+async fn get_skill_detail(
+    workspace: String,
+    skill_path: String,
+    ref_name: Option<String>,
+    token: Option<String>,
+) -> CommandResult<SkillDetailScan> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let workspace = parse_workspace(&workspace)?;
+    let token = token.or_else(|| saved_github_token(&paths));
+    Ok(teamai_sync::read_github_skill_detail(
+        &workspace,
+        &skill_path,
+        ref_name.as_deref(),
+        token.as_deref(),
+    )
+    .await?)
+}
+
+#[tauri::command]
+async fn list_github_workspaces(query: Option<String>) -> CommandResult<Vec<Workspace>> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let token = saved_github_token(&paths).ok_or_else(|| {
+        CommandError::coded(
+            "missing_github_token",
+            "log in with a GitHub token before listing repositories",
+        )
+    })?;
+    let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
+    let page = provider
+        .list_workspaces(PageOpts {
+            cursor: None,
+            per_page: Some(100),
+        })
+        .await
+        .map_err(provider_command_error)?;
+    let needle = query.unwrap_or_default().trim().to_lowercase();
+    let mut workspaces: Vec<Workspace> = page
+        .items
+        .into_iter()
+        .filter(|workspace| {
+            needle.is_empty() || workspace.full_name.to_lowercase().contains(&needle)
+        })
+        .collect();
+    workspaces.sort_by(|a, b| a.full_name.cmp(&b.full_name));
+    Ok(workspaces)
+}
+
+#[tauri::command]
+async fn invite_github_collaborator(
+    workspace: String,
+    login: String,
+    role: String,
+    token: Option<String>,
+) -> CommandResult<Invitation> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let workspace = parse_workspace(&workspace)?;
+    let token = token
+        .or_else(|| saved_github_token(&paths))
+        .ok_or_else(|| {
+            CommandError::coded(
+                "missing_github_token",
+                "GitHub token is required for invite",
+            )
+        })?;
+    let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
+    let current_user = provider
+        .current_user()
+        .await
+        .map_err(provider_command_error)?;
+    let permission = provider
+        .check_permission(&workspace, &current_user.login)
+        .await
+        .map_err(provider_command_error)?;
+    if !matches!(
+        permission,
+        PermissionLevel::Admin | PermissionLevel::Maintain
+    ) {
+        return Err(CommandError::coded(
+            "insufficient_permission",
+            format!(
+                "github user {} must have admin or maintain permission on {} to invite collaborators",
+                current_user.login,
+                workspace.full_name()
+            ),
+        ));
+    }
+    provider
+        .create_invitation(
+            &workspace,
+            InvitationInput {
+                login_or_email: login,
+                role: parse_permission_role(&role)?,
+            },
+        )
+        .await
+        .map_err(provider_command_error)
+}
+
+#[tauri::command]
+async fn list_workspace_members(
+    workspace: String,
+    token: Option<String>,
+) -> CommandResult<Vec<Member>> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let workspace = parse_workspace(&workspace)?;
+    let token = token
+        .or_else(|| saved_github_token(&paths))
+        .ok_or_else(|| {
+            CommandError::coded(
+                "missing_github_token",
+                "GitHub token is required for listing workspace members",
+            )
+        })?;
+    let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
+    let members = provider
+        .list_members(
+            &workspace,
+            PageOpts {
+                cursor: None,
+                per_page: Some(100),
+            },
+        )
+        .await
+        .map_err(provider_command_error)?;
+    Ok(members.items)
+}
+
+#[tauri::command]
+async fn compare_skill_versions(
+    workspace: String,
+    skill_path: String,
+    from: String,
+    to: String,
+    token: Option<String>,
+) -> CommandResult<SkillComparison> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let workspace = parse_workspace(&workspace)?;
+    let token = token.or_else(|| saved_github_token(&paths));
+    let provider = github_provider(token.as_deref())?;
+    let comparison = provider
+        .compare_refs(
+            &workspace,
+            &GitRef::Tag(from.clone()),
+            &GitRef::Tag(to.clone()),
+        )
+        .await
+        .map_err(provider_command_error)?;
+    let from_detail = teamai_sync::read_github_skill_detail(
+        &workspace,
+        &skill_path,
+        Some(&from),
+        token.as_deref(),
+    )
+    .await?;
+    let to_detail =
+        teamai_sync::read_github_skill_detail(&workspace, &skill_path, Some(&to), token.as_deref())
+            .await?;
+    let files = comparison
+        .files
+        .into_iter()
+        .filter(|file| file.filename.starts_with(&skill_path))
+        .collect();
+    Ok(SkillComparison {
+        workspace,
+        skill_path,
+        from,
+        to,
+        files,
+        semantic: teamai_manifest::semantic_diff(
+            &from_detail.asset.manifest,
+            &to_detail.asset.manifest,
+        ),
+    })
+}
+
+#[tauri::command]
+fn parse_skill(path: String) -> CommandResult<teamai_manifest::ManifestParseResult> {
+    Ok(teamai_manifest::parse_skill_dir(path)?)
+}
+
+#[tauri::command]
+fn read_subscriptions() -> CommandResult<SubscriptionsFile> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    Ok(teamai_sync::read_subscriptions(&paths.subscriptions)?)
+}
+
+#[tauri::command]
+fn subscribe_workspace_skill(
+    workspace: String,
+    asset_id: String,
+    version: Option<String>,
+    targets: Vec<String>,
+) -> CommandResult<SubscriptionsFile> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let workspace = parse_workspace(&workspace)?;
+    let subscription = Subscription {
+        workspace,
+        asset_id,
+        channel: "stable".to_owned(),
+        version,
+        update: teamai_core::UpdatePolicy::Manual,
+        targets: selection_from_targets(targets),
+        subscribed_at: None,
+    };
+    Ok(teamai_sync::subscribe(&paths.subscriptions, subscription)?)
+}
+
+#[tauri::command]
+fn install_skill(
+    source: String,
+    targets: Vec<String>,
+    confirmed_risk: Option<bool>,
+) -> CommandResult<InstallReport> {
+    let source_dir = PathBuf::from(source);
+    let parse_result = teamai_manifest::parse_skill_dir(&source_dir)?;
+    let manifest = parse_result.manifest.ok_or_else(|| {
+        CommandError::coded(
+            "invalid_skill_source",
+            format!("invalid skill source: {:?}", parse_result.errors),
+        )
+    })?;
+    let risk_level = effective_risk(&manifest);
+    if risk_level.requires_confirmation() && confirmed_risk != Some(true) {
+        return Err(CommandError::coded(
+            "risk_confirmation_required",
+            format!(
+                "risk confirmation required for {}: {} risk permissions [{}]",
+                manifest.id,
+                risk_level,
+                manifest.permissions.join(", ")
+            ),
+        ));
+    }
+    Ok(teamai_installer::install(InstallOptions {
+        source_dir,
+        targets,
+        target_roots: Vec::<TargetRoot>::new(),
+    })?)
+}
+
+#[tauri::command]
+fn remove_skill(
+    skill_id: String,
+    targets: Vec<String>,
+) -> CommandResult<Vec<PathBuf>> {
+    Ok(teamai_installer::remove(&skill_id, &targets, Vec::<TargetRoot>::new())?)
+}
+
+// ---------------------------------------------------------------------------
+// SQLite-backed skill management
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ManagedSkill {
+    id: String,
+    name: String,
+    description: String,
+    version: String,
+    source_workspace: String,
+    source_path: String,
+    source_branch: String,
+    local_path: String,
+    link_mode: String,
+    baseline_hash: String,
+    is_modified: bool,
+    installed_at: String,
+    updated_at: String,
+    targets: Vec<ManagedSkillTarget>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ManagedSkillTarget {
+    runtime: String,
+    enabled: bool,
+    target_path: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UnmanagedSkillInfo {
+    id: String,
+    name: String,
+    path: String,
+    found_in: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SupportedRuntime {
+    id: String,
+    label: String,
+    global_path: String,
+    exists: bool,
+}
+
+/// List all supported runtimes and whether their directories exist.
+#[tauri::command]
+fn db_list_runtimes() -> CommandResult<Vec<SupportedRuntime>> {
+    let home = dirs::home_dir().ok_or_else(|| {
+        CommandError::coded("home_dir_unavailable", "cannot resolve home directory")
+    })?;
+    Ok(db::SUPPORTED_RUNTIMES
+        .iter()
+        .map(|r| {
+            let path = home.join(r.global_path);
+            SupportedRuntime {
+                id: r.id.to_owned(),
+                label: r.label.to_owned(),
+                global_path: r.global_path.to_owned(),
+                exists: path.is_dir(),
+            }
+        })
+        .collect())
+}
+
+/// List all managed skills from SQLite with their target states.
+#[tauri::command]
+fn db_list_skills(app: tauri::AppHandle) -> CommandResult<Vec<ManagedSkill>> {
+    let database = app.state::<Mutex<db::Database>>();
+    let db = database.lock().unwrap();
+    let skills = db.list_skills().map_err(|e| CommandError::coded("db_error", e.to_string()))?;
+    let all_targets = db.get_all_targets().map_err(|e| CommandError::coded("db_error", e.to_string()))?;
+
+    Ok(skills
+        .into_iter()
+        .map(|s| {
+            let targets: Vec<ManagedSkillTarget> = all_targets
+                .iter()
+                .filter(|t| t.skill_id == s.id)
+                .map(|t| ManagedSkillTarget {
+                    runtime: t.runtime.clone(),
+                    enabled: t.enabled,
+                    target_path: t.target_path.clone(),
+                })
+                .collect();
+            ManagedSkill {
+                id: s.id,
+                name: s.name,
+                description: s.description,
+                version: s.version,
+                source_workspace: s.source_workspace,
+                source_path: s.source_path,
+                source_branch: s.source_branch,
+                local_path: s.local_path,
+                link_mode: s.link_mode,
+                baseline_hash: s.baseline_hash,
+                is_modified: s.is_modified,
+                installed_at: s.installed_at,
+                updated_at: s.updated_at,
+                targets,
+            }
+        })
+        .collect())
+}
+
+/// Enable a skill for a specific runtime (create symlink/copy).
+#[tauri::command]
+fn db_enable_skill(app: tauri::AppHandle, skill_id: String, runtime: String) -> CommandResult<()> {
+    let home = dirs::home_dir().ok_or_else(|| {
+        CommandError::coded("home_dir_unavailable", "cannot resolve home directory")
+    })?;
+    let database = app.state::<Mutex<db::Database>>();
+    let db_guard = database.lock().unwrap();
+
+    let skill = db_guard
+        .get_skill(&skill_id)
+        .map_err(|e| CommandError::coded("db_error", e.to_string()))?
+        .ok_or_else(|| CommandError::coded("skill_not_found", format!("skill '{}' not in registry", skill_id)))?;
+
+    let target_dir = db::resolve_runtime_global_path(&home, &runtime).ok_or_else(|| {
+        CommandError::coded("unsupported_runtime", format!("runtime '{}' is not supported", runtime))
+    })?;
+    let target_path = target_dir.join(&skill_id);
+    let source_path = PathBuf::from(&skill.local_path);
+
+    db::link_skill(&source_path, &target_path, &skill.link_mode)
+        .map_err(|e| CommandError::coded("link_error", e.to_string()))?;
+
+    db_guard
+        .set_target_enabled(&skill_id, &runtime, true, &target_path.to_string_lossy())
+        .map_err(|e| CommandError::coded("db_error", e.to_string()))?;
+
+    Ok(())
+}
+
+/// Disable a skill for a specific runtime (remove symlink/copy).
+#[tauri::command]
+fn db_disable_skill(app: tauri::AppHandle, skill_id: String, runtime: String) -> CommandResult<()> {
+    let home = dirs::home_dir().ok_or_else(|| {
+        CommandError::coded("home_dir_unavailable", "cannot resolve home directory")
+    })?;
+    let database = app.state::<Mutex<db::Database>>();
+    let db_guard = database.lock().unwrap();
+
+    let target_dir = db::resolve_runtime_global_path(&home, &runtime).ok_or_else(|| {
+        CommandError::coded("unsupported_runtime", format!("runtime '{}' is not supported", runtime))
+    })?;
+    let target_path = target_dir.join(&skill_id);
+
+    db::unlink_skill(&target_path)
+        .map_err(|e| CommandError::coded("unlink_error", e.to_string()))?;
+
+    db_guard
+        .set_target_enabled(&skill_id, &runtime, false, &target_path.to_string_lossy())
+        .map_err(|e| CommandError::coded("db_error", e.to_string()))?;
+
+    Ok(())
+}
+
+/// Scan all IDE directories for skills not managed by us.
+#[tauri::command]
+fn db_scan_unmanaged(app: tauri::AppHandle) -> CommandResult<Vec<UnmanagedSkillInfo>> {
+    let home = dirs::home_dir().ok_or_else(|| {
+        CommandError::coded("home_dir_unavailable", "cannot resolve home directory")
+    })?;
+    let database = app.state::<Mutex<db::Database>>();
+    let db_guard = database.lock().unwrap();
+
+    let unmanaged = db::scan_unmanaged_skills(&home, &db_guard);
+    Ok(unmanaged
+        .into_iter()
+        .map(|s| UnmanagedSkillInfo {
+            id: s.id,
+            name: s.name,
+            path: s.path.to_string_lossy().to_string(),
+            found_in: s.found_in,
+        })
+        .collect())
+}
+
+/// Import an unmanaged skill into our data directory and register it.
+#[tauri::command]
+fn db_import_skill(
+    app: tauri::AppHandle,
+    skill_id: String,
+    source_path: String,
+    link_mode: Option<String>,
+) -> CommandResult<ManagedSkill> {
+    let paths = AppPaths::resolve()?;
+    let database = app.state::<Mutex<db::Database>>();
+    let db_guard = database.lock().unwrap();
+
+    let link_mode = link_mode.unwrap_or_else(|| "symlink".to_owned());
+    let source = PathBuf::from(&source_path);
+    let dest = paths.home.join("skills").join(&skill_id);
+
+    // Copy skill to our data directory
+    if !dest.exists() {
+        db::copy_dir_recursive(&source, &dest)
+            .map_err(|e| CommandError::coded("copy_error", e.to_string()))?;
+    }
+
+    // Parse manifest for metadata
+    let manifest = teamai_manifest::parse_skill_dir(&dest)
+        .ok()
+        .and_then(|p| p.manifest);
+
+    let name = manifest.as_ref().map(|m| m.name.clone()).unwrap_or_else(|| skill_id.clone());
+    let description = manifest.as_ref().map(|m| m.description.clone()).unwrap_or_default();
+    let version = manifest.as_ref().map(|m| m.version.clone()).unwrap_or_else(|| "0.1.0".to_owned());
+
+    // Compute content hash for change detection
+    let baseline_hash = db::compute_dir_hash(&dest);
+
+    db_guard
+        .insert_skill(
+            &skill_id,
+            &name,
+            &description,
+            &version,
+            "",
+            "",
+            "",
+            &dest.to_string_lossy(),
+            &link_mode,
+            &baseline_hash,
+        )
+        .map_err(|e| CommandError::coded("db_error", e.to_string()))?;
+
+    let targets = db_guard
+        .get_targets_for_skill(&skill_id)
+        .map_err(|e| CommandError::coded("db_error", e.to_string()))?;
+
+    Ok(ManagedSkill {
+        id: skill_id,
+        name,
+        description,
+        version,
+        source_workspace: String::new(),
+        source_path: source_path,
+        source_branch: String::new(),
+        local_path: dest.to_string_lossy().to_string(),
+        link_mode,
+        baseline_hash,
+        is_modified: false,
+        installed_at: chrono::Utc::now().to_rfc3339(),
+        updated_at: chrono::Utc::now().to_rfc3339(),
+        targets: targets
+            .into_iter()
+            .map(|t| ManagedSkillTarget {
+                runtime: t.runtime,
+                enabled: t.enabled,
+                target_path: t.target_path,
+            })
+            .collect(),
+    })
+}
+
+/// Open the Team AI Hub data directory in the system file manager.
+#[tauri::command]
+fn open_data_dir(app: tauri::AppHandle) -> CommandResult<()> {
+    let paths = AppPaths::resolve()?;
+    app.opener()
+        .open_path(paths.home.to_string_lossy().to_string(), None::<&str>)
+        .map_err(|err| CommandError::coded("open_dir_failed", err.to_string()))?;
+    Ok(())
+}
+
+/// Get cache size breakdown by workspace (from SQLite).
+#[tauri::command]
+fn db_cache_stats(app: tauri::AppHandle) -> CommandResult<Vec<CacheSizeInfo>> {
+    let database = app.state::<Mutex<db::Database>>();
+    let db_guard = database.lock().unwrap();
+    let rows = db_guard
+        .cache_size_by_workspace()
+        .map_err(|e| CommandError::coded("db_error", e.to_string()))?;
+    Ok(rows
+        .into_iter()
+        .map(|r| CacheSizeInfo {
+            workspace: r.workspace,
+            count: r.count,
+            total_bytes: r.total_bytes,
+        })
+        .collect())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CacheSizeInfo {
+    workspace: String,
+    count: i64,
+    total_bytes: i64,
+}
+
+/// Clear cache for a specific workspace.
+#[tauri::command]
+fn db_clear_cache(app: tauri::AppHandle, workspace: Option<String>) -> CommandResult<()> {
+    let database = app.state::<Mutex<db::Database>>();
+    let db_guard = database.lock().unwrap();
+    match workspace {
+        Some(ws) => db_guard
+            .clear_cache_for_workspace(&ws)
+            .map_err(|e| CommandError::coded("db_error", e.to_string()))?,
+        None => db_guard
+            .clear_all_cache()
+            .map_err(|e| CommandError::coded("db_error", e.to_string()))?,
+    }
+    Ok(())
+}
+
+/// Get a cache entry by key (returns base64-encoded data or null).
+#[tauri::command]
+fn db_cache_get(app: tauri::AppHandle, key: String) -> CommandResult<Option<String>> {
+    let database = app.state::<Mutex<db::Database>>();
+    let db_guard = database.lock().unwrap();
+    let data = db_guard
+        .get_cache(&key)
+        .map_err(|e| CommandError::coded("db_error", e.to_string()))?;
+    Ok(data.map(|bytes| {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(&bytes)
+    }))
+}
+
+/// Put a cache entry (data is base64-encoded string from frontend).
+#[tauri::command]
+fn db_cache_put(app: tauri::AppHandle, key: String, workspace: String, data: String) -> CommandResult<()> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&data)
+        .map_err(|e| CommandError::coded("decode_error", e.to_string()))?;
+    let database = app.state::<Mutex<db::Database>>();
+    let db_guard = database.lock().unwrap();
+    db_guard
+        .put_cache(&key, &workspace, &bytes)
+        .map_err(|e| CommandError::coded("db_error", e.to_string()))?;
+    Ok(())
+}
+
+/// Delete a single cache entry by key.
+#[tauri::command]
+fn db_cache_delete(app: tauri::AppHandle, key: String) -> CommandResult<()> {
+    let database = app.state::<Mutex<db::Database>>();
+    let db_guard = database.lock().unwrap();
+    db_guard
+        .delete_cache(&key)
+        .map_err(|e| CommandError::coded("db_error", e.to_string()))?;
+    Ok(())
+}
+
+/// Delete all cache entries whose key starts with the given prefix.
+#[tauri::command]
+fn db_cache_delete_prefix(app: tauri::AppHandle, prefix: String) -> CommandResult<usize> {
+    let database = app.state::<Mutex<db::Database>>();
+    let db_guard = database.lock().unwrap();
+    let count = db_guard
+        .delete_cache_by_prefix(&prefix)
+        .map_err(|e| CommandError::coded("db_error", e.to_string()))?;
+    Ok(count)
+}
+
+// ---------------------------------------------------------------------------
+// Filesystem-based remote file cache (~/.team-ai-hub/remote/)
+// ---------------------------------------------------------------------------
+
+/// Resolve the remote cache root: ~/.team-ai-hub/remote/
+fn remote_cache_root() -> CommandResult<PathBuf> {
+    let home = dirs::home_dir().ok_or_else(|| CommandError::coded("no_home", "cannot resolve home directory"))?;
+    Ok(home.join(".team-ai-hub").join("remote"))
+}
+
+/// Validate a path segment to prevent path traversal attacks.
+fn validate_path_segment(segment: &str) -> CommandResult<()> {
+    if segment.is_empty()
+        || segment == "."
+        || segment == ".."
+        || segment.contains('\\')
+        || segment.contains('\0')
+        || segment.starts_with('/')
+    {
+        return Err(CommandError::coded(
+            "invalid_path",
+            format!("invalid path segment: {:?}", segment),
+        ));
+    }
+    Ok(())
+}
+
+/// Build a safe cache file path: remote/{workspace}/{ref}/{file_path}
+fn build_cache_path(workspace: &str, ref_name: &str, file_path: &str) -> CommandResult<PathBuf> {
+    let root = remote_cache_root()?;
+    // workspace is like "owner/repo" — validate each part
+    for part in workspace.split('/') {
+        validate_path_segment(part)?;
+    }
+    validate_path_segment(ref_name)?;
+    // file_path can have nested dirs like "skills/code-reviewer/SKILL.md"
+    for part in file_path.split('/') {
+        validate_path_segment(part)?;
+    }
+    Ok(root.join(workspace).join(ref_name).join(file_path))
+}
+
+/// Write a file to the remote cache. Binary data is passed as base64.
+#[tauri::command]
+fn remote_cache_put_file(
+    workspace: String,
+    ref_name: String,
+    file_path: String,
+    data: String,
+    is_binary: bool,
+) -> CommandResult<()> {
+    let target = build_cache_path(&workspace, &ref_name, &file_path)?;
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| CommandError::coded("io_error", format!("mkdir failed: {}", e)))?;
+    }
+    if is_binary {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&data)
+            .map_err(|e| CommandError::coded("decode_error", e.to_string()))?;
+        fs::write(&target, &bytes)
+            .map_err(|e| CommandError::coded("io_error", format!("write failed: {}", e)))?;
+    } else {
+        fs::write(&target, data.as_bytes())
+            .map_err(|e| CommandError::coded("io_error", format!("write failed: {}", e)))?;
+    }
+    // Remove execute permission (644)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&target, fs::Permissions::from_mode(0o644));
+    }
+    Ok(())
+}
+
+/// Read a file from the remote cache. Returns content + is_binary flag.
+#[tauri::command]
+fn remote_cache_get_file(
+    workspace: String,
+    ref_name: String,
+    file_path: String,
+) -> CommandResult<Option<CachedFileResult>> {
+    let target = build_cache_path(&workspace, &ref_name, &file_path)?;
+    if !target.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(&target)
+        .map_err(|e| CommandError::coded("io_error", format!("read failed: {}", e)))?;
+    // Try UTF-8; if fails, return as base64
+    match String::from_utf8(bytes.clone()) {
+        Ok(text) => Ok(Some(CachedFileResult {
+            content: text,
+            is_binary: false,
+        })),
+        Err(_) => Ok(Some(CachedFileResult {
+            content: base64::engine::general_purpose::STANDARD.encode(&bytes),
+            is_binary: true,
+        })),
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedFileResult {
+    content: String,
+    is_binary: bool,
+}
+
+/// Delete all cached files for a specific skill path within a workspace.
+#[tauri::command]
+fn remote_cache_delete_skill(workspace: String, skill_path: String) -> CommandResult<()> {
+    let root = remote_cache_root()?;
+    for part in workspace.split('/') {
+        validate_path_segment(part)?;
+    }
+    for part in skill_path.split('/') {
+        validate_path_segment(part)?;
+    }
+    let ws_dir = root.join(&workspace);
+    if !ws_dir.exists() {
+        return Ok(());
+    }
+    // Walk all ref dirs under workspace and delete the skill_path subtree
+    if let Ok(entries) = fs::read_dir(&ws_dir) {
+        for entry in entries.flatten() {
+            let ref_dir = entry.path();
+            if ref_dir.is_dir() {
+                let skill_dir = ref_dir.join(&skill_path);
+                if skill_dir.exists() {
+                    let _ = fs::remove_dir_all(&skill_dir);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Delete all cached files for a workspace.
+#[tauri::command]
+fn remote_cache_delete_workspace(workspace: String) -> CommandResult<()> {
+    let root = remote_cache_root()?;
+    for part in workspace.split('/') {
+        validate_path_segment(part)?;
+    }
+    let ws_dir = root.join(&workspace);
+    if ws_dir.exists() {
+        fs::remove_dir_all(&ws_dir)
+            .map_err(|e| CommandError::coded("io_error", format!("remove failed: {}", e)))?;
+    }
+    Ok(())
+}
+
+/// Get cache size stats for the remote file cache.
+#[tauri::command]
+fn remote_cache_stats() -> CommandResult<Vec<RemoteCacheStat>> {
+    let root = remote_cache_root()?;
+    if !root.exists() {
+        return Ok(vec![]);
+    }
+    let mut stats: Vec<RemoteCacheStat> = Vec::new();
+    // Walk top-level: owner dirs
+    if let Ok(owners) = fs::read_dir(&root) {
+        for owner_entry in owners.flatten() {
+            let owner_path = owner_entry.path();
+            if !owner_path.is_dir() { continue; }
+            let owner_name = owner_entry.file_name().to_string_lossy().to_string();
+            // Walk repo dirs under owner
+            if let Ok(repos) = fs::read_dir(&owner_path) {
+                for repo_entry in repos.flatten() {
+                    let repo_path = repo_entry.path();
+                    if !repo_path.is_dir() { continue; }
+                    let repo_name = repo_entry.file_name().to_string_lossy().to_string();
+                    let workspace = format!("{}/{}", owner_name, repo_name);
+                    let (total_bytes, file_count) = dir_size_recursive(&repo_path);
+                    stats.push(RemoteCacheStat {
+                        workspace,
+                        total_bytes: total_bytes as i64,
+                        file_count: file_count as i64,
+                    });
+                }
+            }
+        }
+    }
+    stats.sort_by(|a, b| b.total_bytes.cmp(&a.total_bytes));
+    Ok(stats)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteCacheStat {
+    workspace: String,
+    total_bytes: i64,
+    file_count: i64,
+}
+
+fn dir_size_recursive(path: &Path) -> (u64, u64) {
+    let mut total: u64 = 0;
+    let mut count: u64 = 0;
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                let (sub_size, sub_count) = dir_size_recursive(&p);
+                total += sub_size;
+                count += sub_count;
+            } else if let Ok(meta) = p.metadata() {
+                total += meta.len();
+                count += 1;
+            }
+        }
+    }
+    (total, count)
+}
+
+/// Check all managed skills for local modifications (mtime pre-check + hash).
+#[tauri::command]
+fn db_check_modifications(app: tauri::AppHandle) -> CommandResult<Vec<String>> {
+    let database = app.state::<Mutex<db::Database>>();
+    let db_guard = database.lock().unwrap();
+    let skills = db_guard.list_skills().map_err(|e| CommandError::coded("db_error", e.to_string()))?;
+    let mut modified_ids = Vec::new();
+    for skill in &skills {
+        let is_mod = db_guard
+            .check_modified(&skill.id, &skill.local_path)
+            .map_err(|e| CommandError::coded("db_error", e.to_string()))?;
+        if is_mod {
+            modified_ids.push(skill.id.clone());
+        }
+    }
+    Ok(modified_ids)
+}
+
+/// Unmanage a skill: remove from registry, replace symlinks with real copies in IDE dirs.
+#[tauri::command]
+fn db_unmanage_skill(app: tauri::AppHandle, skill_id: String) -> CommandResult<()> {
+    let home = dirs::home_dir().ok_or_else(|| {
+        CommandError::coded("home_dir_unavailable", "cannot resolve home directory")
+    })?;
+    let database = app.state::<Mutex<db::Database>>();
+    let db_guard = database.lock().unwrap();
+
+    let targets = db_guard
+        .get_targets_for_skill(&skill_id)
+        .map_err(|e| CommandError::coded("db_error", e.to_string()))?;
+
+    let skill = db_guard
+        .get_skill(&skill_id)
+        .map_err(|e| CommandError::coded("db_error", e.to_string()))?
+        .ok_or_else(|| CommandError::coded("skill_not_found", format!("skill '{}' not found", skill_id)))?;
+
+    let source_path = PathBuf::from(&skill.local_path);
+
+    // For each enabled target: remove symlink, copy real files back
+    for target in &targets {
+        if !target.enabled {
+            continue;
+        }
+        let target_path = if !target.target_path.is_empty() {
+            PathBuf::from(&target.target_path)
+        } else {
+            match db::resolve_runtime_global_path(&home, &target.runtime) {
+                Some(dir) => dir.join(&skill_id),
+                None => continue,
+            }
+        };
+
+        // Remove symlink
+        let _ = db::unlink_skill(&target_path);
+        // Copy real files back
+        if source_path.is_dir() {
+            let _ = db::copy_dir_recursive(&source_path, &target_path);
+        }
+    }
+
+    // Remove from SQLite
+    db_guard
+        .unmanage_skill(&skill_id)
+        .map_err(|e| CommandError::coded("db_error", e.to_string()))?;
+
+    // Optionally remove from our data directory (keep it for safety)
+    // Users can manually delete ~/.team-ai-hub/skills/{id} if they want
+
+    Ok(())
+}
+
+#[tauri::command]
+fn list_installed_targets(
+    targets: Option<Vec<String>>,
+) -> CommandResult<Vec<InstalledTargetGroup>> {
+    let target_list = targets.unwrap_or_else(default_runtime_targets);
+    target_list
+        .into_iter()
+        .map(|target| {
+            let skills = teamai_installer::list_installed(&target, Vec::<TargetRoot>::new())?;
+            Ok(InstalledTargetGroup { target, skills })
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn list_local_agent_roots() -> CommandResult<Vec<LocalAgentRoot>> {
+    let home = dirs::home_dir().ok_or_else(|| {
+        CommandError::coded(
+            "home_dir_unavailable",
+            "cannot resolve the current user's home directory",
+        )
+    })?;
+    Ok(local_agent_root_specs(&home)
+        .into_iter()
+        .map(scan_local_agent_root)
+        .collect())
+}
+
+#[tauri::command]
+fn preview_publish(
+    source: String,
+    workspace: Option<String>,
+    user: Option<String>,
+) -> CommandResult<PublishPreview> {
+    let package = teamai_publish::package_skill(source)?;
+    let policy = teamai_publish::evaluate_publish_policy(&package)?;
+    let request = match workspace {
+        Some(workspace) => Some(teamai_publish::build_publish_request(
+            &package,
+            &parse_workspace(&workspace)?,
+            user.as_deref().unwrap_or("local"),
+        )),
+        None => None,
+    };
+    Ok(PublishPreview {
+        package,
+        policy,
+        request,
+    })
+}
+
+/// Pull a skill out of a remote workspace into a temp directory so
+/// `package_skill` can re-use the existing local-disk publish pipeline.
+async fn fetch_remote_skill_to_temp(
+    provider: &GitHubProvider,
+    paths: &AppPaths,
+    source: &WorkspaceRef,
+    skill_path: &str,
+    git_ref: &GitRef,
+    rename_to: Option<&str>,
+) -> CommandResult<PathBuf> {
+    let trimmed_path = skill_path.trim_matches('/').to_owned();
+    if trimmed_path.is_empty() {
+        return Err(CommandError::coded(
+            "invalid_skill_path",
+            "skill path inside the workspace cannot be empty",
+        ));
+    }
+
+    let files = provider
+        .list_files(source, git_ref)
+        .await
+        .map_err(provider_command_error)?;
+
+    let prefix = format!("{trimmed_path}/");
+    let entries: Vec<_> = files
+        .into_iter()
+        .filter(|entry| {
+            entry.path == trimmed_path
+                || entry.path.starts_with(&prefix)
+        })
+        .collect();
+    if entries.is_empty() {
+        return Err(CommandError::coded(
+            "skill_not_found",
+            format!(
+                "no files found under {} in {}",
+                trimmed_path,
+                source.full_name()
+            ),
+        ));
+    }
+
+    let scratch = paths.tmp.join("sync").join(format!(
+        "{}-{}-{}",
+        source.owner,
+        source.repo,
+        current_unix_secs()
+    ));
+    fs::create_dir_all(&scratch).map_err(CommandError::from)?;
+
+    for entry in entries {
+        if !matches!(entry.kind, teamai_provider::FileKind::File) {
+            continue;
+        }
+        let blob = provider
+            .read_file(source, git_ref, &entry.path)
+            .await
+            .map_err(provider_command_error)?;
+
+        let rel = entry
+            .path
+            .strip_prefix(&prefix)
+            .or_else(|| entry.path.strip_prefix(&trimmed_path))
+            .unwrap_or(entry.path.as_str())
+            .trim_start_matches('/');
+
+        let dest = scratch.join(rel);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).map_err(CommandError::from)?;
+        }
+        fs::write(&dest, &blob.bytes).map_err(CommandError::from)?;
+    }
+
+    if let Some(new_id) = rename_to {
+        let new_id = new_id.trim();
+        if !new_id.is_empty() {
+            rewrite_skill_id(&scratch, new_id)?;
+        }
+    }
+
+    Ok(scratch)
+}
+
+fn rewrite_skill_id(skill_dir: &Path, new_id: &str) -> CommandResult<()> {
+    // Rewrite the simplest possible "id: <value>" line in manifest.yaml /
+    // SKILL.md frontmatter so package_skill picks up the new id.
+    for filename in ["manifest.yaml", "manifest.yml", "SKILL.md"] {
+        let path = skill_dir.join(filename);
+        if !path.exists() {
+            continue;
+        }
+        let raw = fs::read_to_string(&path).map_err(CommandError::from)?;
+        let rewritten = raw
+            .lines()
+            .map(|line| {
+                let trimmed = line.trim_start();
+                if let Some(rest) = trimmed.strip_prefix("id:") {
+                    let leading = &line[..line.len() - trimmed.len()];
+                    let _ = rest; // suppress unused warning
+                    format!("{leading}id: {new_id}")
+                } else {
+                    line.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&path, rewritten).map_err(CommandError::from)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn preview_publish_from_workspace(
+    source_workspace: String,
+    skill_path: String,
+    source_ref: Option<String>,
+    target_workspace: String,
+    rename_to: Option<String>,
+    user: Option<String>,
+) -> CommandResult<PublishPreview> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let token = saved_github_token(&paths).ok_or_else(|| {
+        CommandError::coded(
+            "missing_github_token",
+            "log in with GitHub before previewing a sync",
+        )
+    })?;
+    let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
+
+    let source_ws = parse_workspace(&source_workspace)?;
+    let target_ws = parse_workspace(&target_workspace)?;
+    let git_ref = match source_ref.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(name) if name.starts_with("refs/tags/") || !name.contains('/') => {
+            // Cheap heuristic: look like a tag (semver-ish) -> Tag, else Branch.
+            if name.chars().next().map(|c| c == 'v').unwrap_or(false)
+                || name.chars().any(|c| c == '.')
+            {
+                GitRef::Tag(name.trim_start_matches("refs/tags/").to_owned())
+            } else {
+                GitRef::Branch(name.to_owned())
+            }
+        }
+        Some(name) => GitRef::Branch(name.to_owned()),
+        None => GitRef::Branch(
+            provider
+                .get_workspace(&source_ws)
+                .await
+                .map_err(provider_command_error)?
+                .default_branch,
+        ),
+    };
+
+    let scratch = fetch_remote_skill_to_temp(
+        &provider,
+        &paths,
+        &source_ws,
+        &skill_path,
+        &git_ref,
+        rename_to.as_deref(),
+    )
+    .await?;
+
+    let package = teamai_publish::package_skill(&scratch)?;
+    let policy = teamai_publish::evaluate_publish_policy(&package)?;
+    let request = teamai_publish::build_publish_request(
+        &package,
+        &target_ws,
+        user.as_deref().unwrap_or("local"),
+    );
+
+    Ok(PublishPreview {
+        package,
+        policy,
+        request: Some(request),
+    })
+}
+
+#[tauri::command]
+async fn publish_skill_to_workspace(
+    source_workspace: String,
+    skill_path: String,
+    source_ref: Option<String>,
+    target_workspace: String,
+    rename_to: Option<String>,
+    user: Option<String>,
+    confirmed_risk: Option<bool>,
+) -> CommandResult<PublishResult> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let token = saved_github_token(&paths).ok_or_else(|| {
+        CommandError::coded(
+            "missing_github_token",
+            "log in with GitHub before publishing",
+        )
+    })?;
+    let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
+
+    let source_ws = parse_workspace(&source_workspace)?;
+    let target_ws = parse_workspace(&target_workspace)?;
+    let git_ref = match source_ref.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(name) => {
+            if name.chars().next().map(|c| c == 'v').unwrap_or(false)
+                || name.starts_with("refs/tags/")
+            {
+                GitRef::Tag(name.trim_start_matches("refs/tags/").to_owned())
+            } else {
+                GitRef::Branch(name.to_owned())
+            }
+        }
+        None => GitRef::Branch(
+            provider
+                .get_workspace(&source_ws)
+                .await
+                .map_err(provider_command_error)?
+                .default_branch,
+        ),
+    };
+
+    let scratch = fetch_remote_skill_to_temp(
+        &provider,
+        &paths,
+        &source_ws,
+        &skill_path,
+        &git_ref,
+        rename_to.as_deref(),
+    )
+    .await?;
+
+    let package = teamai_publish::package_skill(&scratch)?;
+    let policy = teamai_publish::evaluate_publish_policy(&package)?;
+
+    if matches!(
+        policy.decision,
+        teamai_publish::PublishPolicyDecision::Reject
+    ) {
+        return Err(CommandError::coded(
+            "publish_rejected",
+            format!("publish policy rejected this skill: {}", policy.reasons.join("; ")),
+        ));
+    }
+    if package.risk_level != teamai_core::RiskLevel::Low && !confirmed_risk.unwrap_or(false) {
+        return Err(CommandError::coded(
+            "risk_confirmation_required",
+            format!(
+                "this skill has {} risk; pass confirmedRisk=true to proceed",
+                package.risk_level
+            ),
+        ));
+    }
+
+    let request = teamai_publish::build_publish_request(
+        &package,
+        &target_ws,
+        user.as_deref().unwrap_or("local"),
+    );
+    let publish_files = teamai_publish::collect_publish_files(&package)?;
+    let github_files: Vec<GitHubPublishFile> = publish_files
+        .iter()
+        .map(|file| GitHubPublishFile {
+            path: file.target_path.clone(),
+            bytes: file.bytes.clone(),
+        })
+        .collect();
+
+    let result = provider
+        .publish_files_pull_request(
+            &target_ws,
+            GitHubPublishInput {
+                branch_name: request.branch_name.clone(),
+                commit_message: format!(
+                    "teamai: import {} v{}",
+                    package.manifest.id, package.manifest.version
+                ),
+                title: request.title.clone(),
+                body: request.body.clone(),
+                base: None,
+                files: github_files,
+            },
+        )
+        .await
+        .map_err(|err| CommandError::coded("publish_failed", err.to_string()))?;
+
+    Ok(PublishResult {
+        package,
+        policy,
+        request,
+        pull_request: result.pull_request,
+        target_workspace: target_ws.full_name(),
+        uploaded_files: result.uploaded.into_iter().map(|f| f.path).collect(),
+    })
+}
+
+#[tauri::command]
+fn export_diagnostics() -> CommandResult<DiagnosticsExport> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    export_diagnostics_bundle(&paths)
+}
+
+#[tauri::command]
+fn open_logs_folder(app: tauri::AppHandle) -> CommandResult<()> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    app.opener()
+        .open_path(paths.logs.to_string_lossy().to_string(), None::<&str>)
+        .map_err(|err| CommandError::coded("open_logs_failed", err.to_string()))?;
+    Ok(())
+}
+
+fn export_diagnostics_bundle(paths: &AppPaths) -> CommandResult<DiagnosticsExport> {
+    let exported_at = chrono::Utc::now();
+    let output_dir = paths
+        .tmp
+        .join("diagnostics")
+        .join(exported_at.format("%Y%m%dT%H%M%SZ").to_string());
+    fs::create_dir_all(&output_dir).map_err(CommandError::from)?;
+    let subscriptions = teamai_sync::read_subscriptions(&paths.subscriptions)?;
+    let workspaces = teamai_sync::read_workspaces(&paths.workspace_registry)?;
+    fs::write(
+        output_dir.join("summary.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "exportedAt": exported_at,
+            "appHome": paths.home,
+            "subscriptionCount": subscriptions.subscriptions.len(),
+            "workspaceCount": workspaces.workspaces.len(),
+        }))
+        .map_err(CommandError::from)?,
+    )
+    .map_err(CommandError::from)?;
+    fs::write(
+        output_dir.join("subscriptions.json"),
+        serde_json::to_vec_pretty(&subscriptions).map_err(CommandError::from)?,
+    )
+    .map_err(CommandError::from)?;
+    fs::write(
+        output_dir.join("workspaces.json"),
+        serde_json::to_vec_pretty(&workspaces).map_err(CommandError::from)?,
+    )
+    .map_err(CommandError::from)?;
+
+    let logs = copy_sanitized_logs(&paths.logs, &output_dir.join("logs"))?;
+    let export = DiagnosticsExport {
+        exported_at: exported_at.to_rfc3339(),
+        output_dir,
+        app_home: paths.home.clone(),
+        subscriptions: subscriptions.subscriptions.len(),
+        workspaces: workspaces.workspaces.len(),
+        logs,
+        notes: vec![
+            "credentials.json and OS keychain secrets are intentionally excluded".to_owned(),
+            "log files are copied with token-looking values redacted".to_owned(),
+        ],
+    };
+    fs::write(
+        export.output_dir.join("diagnostics.json"),
+        serde_json::to_vec_pretty(&export).map_err(CommandError::from)?,
+    )
+    .map_err(CommandError::from)?;
+    Ok(export)
+}
+
+fn copy_sanitized_logs(logs_dir: &Path, output_dir: &Path) -> CommandResult<Vec<PathBuf>> {
+    if !logs_dir.exists() {
+        return Ok(Vec::new());
+    }
+    fs::create_dir_all(output_dir).map_err(CommandError::from)?;
+    let mut copied = Vec::new();
+    for entry in fs::read_dir(logs_dir).map_err(CommandError::from)? {
+        let source = entry.map_err(CommandError::from)?.path();
+        if !source.is_file() || source.extension().and_then(|value| value.to_str()) != Some("log") {
+            continue;
+        }
+        let Some(file_name) = source.file_name() else {
+            continue;
+        };
+        let destination = output_dir.join(file_name);
+        let raw = fs::read_to_string(&source).unwrap_or_else(|_| "<binary log omitted>".to_owned());
+        fs::write(&destination, redact_sensitive_text(&raw)).map_err(CommandError::from)?;
+        copied.push(destination);
+    }
+    copied.sort();
+    Ok(copied)
+}
+
+fn redact_sensitive_text(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index..].starts_with(b"GITHUB_TOKEN") {
+            output.extend_from_slice(b"[REDACTED]");
+            index += b"GITHUB_TOKEN".len();
+            continue;
+        }
+        if let Some(prefix) = github_token_prefix(&bytes[index..]) {
+            output.extend_from_slice(b"[REDACTED]");
+            index += prefix.len();
+            while index < bytes.len() && is_github_token_char(bytes[index]) {
+                index += 1;
+            }
+            continue;
+        }
+        output.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8(output).unwrap_or_else(|_| "[REDACTED]".to_owned())
+}
+
+fn github_token_prefix(value: &[u8]) -> Option<&'static [u8]> {
+    const PREFIXES: &[&[u8]] = &[b"github_pat_", b"ghp_", b"gho_", b"ghu_", b"ghs_", b"ghr_"];
+    PREFIXES
+        .iter()
+        .copied()
+        .find(|prefix| value.starts_with(prefix))
+}
+
+fn is_github_token_char(value: u8) -> bool {
+    value.is_ascii_alphanumeric() || value == b'_' || value == b'-'
+}
+
+fn register_deep_link<R: tauri::Runtime>(app: &tauri::AppHandle<R>, url: Url) {
+    let payload = parse_deep_link(url);
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_focus();
+        let _ = window.show();
+        let _ = window.unminimize();
+    }
+    if let Some(payload) = payload {
+        if let Some(state) = app.try_state::<DeepLinkState>() {
+            *state.last.lock().unwrap() = Some(payload.clone());
+        }
+        let _ = app.emit(DEEP_LINK_EVENT, payload);
+    }
+}
+
+fn parse_deep_link(url: Url) -> Option<DeepLinkPayload> {
+    if url.scheme() != "teamai" {
+        return None;
+    }
+    let action = url.host_str().unwrap_or_default().to_owned();
+    if action != DEEP_LINK_SUBSCRIBE_PATH {
+        return Some(DeepLinkPayload {
+            url: url.to_string(),
+            action,
+            workspace: None,
+            asset_id: None,
+            version: None,
+            targets: Vec::new(),
+            query: parse_query_pairs(&url),
+        });
+    }
+
+    let query = parse_query_pairs(&url);
+    let workspace = query
+        .get("workspace")
+        .and_then(|value| parse_workspace(value).ok());
+    let asset_id = query
+        .get("assetId")
+        .cloned()
+        .or_else(|| query.get("asset_id").cloned());
+    let version = query.get("version").cloned();
+    let targets = query
+        .get("targets")
+        .map(|value| {
+            value
+                .split(',')
+                .map(|target| target.trim().to_owned())
+                .filter(|target| !target.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Some(DeepLinkPayload {
+        url: url.to_string(),
+        action,
+        workspace,
+        asset_id,
+        version,
+        targets,
+        query,
+    })
+}
+
+fn parse_query_pairs(url: &Url) -> HashMap<String, String> {
+    url.query_pairs()
+        .into_owned()
+        .collect::<HashMap<String, String>>()
+}
+
+fn parse_workspace(value: &str) -> CommandResult<WorkspaceRef> {
+    let value = value
+        .trim()
+        .strip_prefix("github.com/")
+        .unwrap_or_else(|| value.trim());
+    let Some((owner, repo)) = value.split_once('/') else {
+        return Err(CommandError::coded(
+            "invalid_workspace",
+            "workspace must look like owner/repo or github.com/owner/repo",
+        ));
+    };
+    Ok(WorkspaceRef::github(owner, repo))
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceHeadInfo {
+    sha: String,
+    branch: String,
+    committed_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceChangedPaths {
+    base_sha: String,
+    head_sha: String,
+    changed_skill_paths: Vec<String>,
+    total_changed_files: usize,
+}
+
+/// Returns the HEAD commit SHA of the workspace's default branch.
+/// This is the cheapest possible check — one API call to detect any change.
+#[tauri::command]
+async fn check_workspace_head(workspace: String) -> CommandResult<WorkspaceHeadInfo> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let token = saved_github_token(&paths).ok_or_else(|| {
+        CommandError::coded(
+            "missing_github_token",
+            "log in with GitHub before checking workspace head",
+        )
+    })?;
+    let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
+    let workspace = parse_workspace(&workspace)?;
+
+    // Get workspace info for default branch name
+    let ws_info = provider
+        .get_workspace(&workspace)
+        .await
+        .map_err(provider_command_error)?;
+
+    // Get the latest commit on the default branch (path="" = repo root)
+    let commits = provider
+        .list_path_commits(&workspace, "", Some(&ws_info.default_branch), 1)
+        .await
+        .map_err(provider_command_error)?;
+
+    let head = commits.first().ok_or_else(|| {
+        CommandError::coded("no_commits", "workspace has no commits")
+    })?;
+
+    Ok(WorkspaceHeadInfo {
+        sha: head.sha.clone(),
+        branch: ws_info.default_branch,
+        committed_at: Some(head.authored_at.clone()),
+    })
+}
+
+/// Compares two SHAs and returns which skill paths were affected.
+/// Only called when check_workspace_head detects a SHA change.
+#[tauri::command]
+async fn diff_workspace_since(
+    workspace: String,
+    base_sha: String,
+    head_sha: String,
+    skill_paths: Vec<String>,
+) -> CommandResult<WorkspaceChangedPaths> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let token = saved_github_token(&paths).ok_or_else(|| {
+        CommandError::coded(
+            "missing_github_token",
+            "log in with GitHub before diffing workspace",
+        )
+    })?;
+    let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
+    let workspace = parse_workspace(&workspace)?;
+
+    // GitHub compare API accepts SHAs as branch refs
+    let comparison = provider
+        .compare_refs(
+            &workspace,
+            &GitRef::Branch(base_sha.clone()),
+            &GitRef::Branch(head_sha.clone()),
+        )
+        .await
+        .map_err(provider_command_error)?;
+
+    let total_changed_files = comparison.files.len();
+
+    // Find which known skill paths have changed files
+    let changed_skill_paths: Vec<String> = skill_paths
+        .into_iter()
+        .filter(|skill_path| {
+            let prefix = skill_path.trim_matches('/');
+            comparison.files.iter().any(|file| {
+                file.filename.starts_with(prefix)
+                    || file.filename.starts_with(&format!("{prefix}/"))
+            })
+        })
+        .collect();
+
+    Ok(WorkspaceChangedPaths {
+        base_sha,
+        head_sha,
+        changed_skill_paths,
+        total_changed_files,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Branch listing
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BranchInfo {
+    name: String,
+    is_default: bool,
+}
+
+/// Lists branches for a workspace repository.
+#[tauri::command]
+async fn list_workspace_branches(workspace: String) -> CommandResult<Vec<BranchInfo>> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let token = saved_github_token(&paths).ok_or_else(|| {
+        CommandError::coded("missing_github_token", "log in with GitHub first")
+    })?;
+    let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
+    let workspace = parse_workspace(&workspace)?;
+
+    let ws_info = provider.get_workspace(&workspace).await.map_err(provider_command_error)?;
+    let branches = provider.list_branches(&workspace).await.map_err(provider_command_error)?;
+
+    Ok(branches
+        .into_iter()
+        .map(|name| BranchInfo {
+            is_default: name == ws_info.default_branch,
+            name,
+        })
+        .collect())
+}
+
+// ---------------------------------------------------------------------------
+// Skill file tree & single file read
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillFileEntry {
+    path: String,
+    relative_path: String,
+    kind: String, // "file" | "directory"
+    size: Option<u64>,
+}
+
+/// Lists all files inside a skill directory (recursive).
+#[tauri::command]
+async fn list_skill_files(
+    workspace: String,
+    skill_path: String,
+    ref_name: Option<String>,
+) -> CommandResult<Vec<SkillFileEntry>> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let workspace = parse_workspace(&workspace)?;
+    let token = saved_github_token(&paths).ok_or_else(|| {
+        CommandError::coded("missing_github_token", "log in with GitHub first")
+    })?;
+    let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
+
+    let git_ref = match ref_name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(name) => GitRef::Branch(name.to_owned()),
+        None => {
+            let ws_info = provider.get_workspace(&workspace).await.map_err(provider_command_error)?;
+            GitRef::Branch(ws_info.default_branch)
+        }
+    };
+
+    let all_files = provider
+        .list_files(&workspace, &git_ref)
+        .await
+        .map_err(provider_command_error)?;
+
+    let prefix = skill_path.trim_matches('/');
+    let prefix_with_slash = format!("{prefix}/");
+
+    let entries: Vec<SkillFileEntry> = all_files
+        .into_iter()
+        .filter(|entry| entry.path.starts_with(&prefix_with_slash))
+        .map(|entry| {
+            let relative_path = entry.path[prefix_with_slash.len()..].to_owned();
+            SkillFileEntry {
+                path: entry.path,
+                relative_path,
+                kind: match entry.kind {
+                    teamai_provider::FileKind::Directory => "directory".to_owned(),
+                    _ => "file".to_owned(),
+                },
+                size: entry.size,
+            }
+        })
+        .collect();
+
+    Ok(entries)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileContent {
+    path: String,
+    content: String,
+    sha: String,
+    encoding: String,
+    is_binary: bool,
+}
+
+/// Reads a single file from the workspace repo.
+#[tauri::command]
+async fn read_skill_file(
+    workspace: String,
+    file_path: String,
+    ref_name: Option<String>,
+) -> CommandResult<FileContent> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let workspace = parse_workspace(&workspace)?;
+    let token = saved_github_token(&paths).ok_or_else(|| {
+        CommandError::coded("missing_github_token", "log in with GitHub first")
+    })?;
+    let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
+
+    let git_ref = match ref_name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(name) => GitRef::Branch(name.to_owned()),
+        None => {
+            let ws_info = provider.get_workspace(&workspace).await.map_err(provider_command_error)?;
+            GitRef::Branch(ws_info.default_branch)
+        }
+    };
+
+    let blob = provider
+        .read_file(&workspace, &git_ref, &file_path)
+        .await
+        .map_err(provider_command_error)?;
+
+    // Try to decode as UTF-8; if it fails, mark as binary
+    let (content, is_binary) = match String::from_utf8(blob.bytes.clone()) {
+        Ok(text) => (text, false),
+        Err(_) => (base64::engine::general_purpose::STANDARD.encode(&blob.bytes), true),
+    };
+
+    Ok(FileContent {
+        path: blob.path,
+        content,
+        sha: blob.sha,
+        encoding: if is_binary { "base64".to_owned() } else { "utf-8".to_owned() },
+        is_binary,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// GitHub Discussions (likes + comments)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiscussionInfo {
+    id: String,
+    number: u64,
+    title: String,
+    url: String,
+    body: String,
+    body_author: String,
+    body_author_avatar: Option<String>,
+    upvotes: u64,
+    comment_count: u64,
+    created_at: String,
+    has_discussions: bool,
+    reactions: Vec<ReactionGroup>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReactionGroup {
+    content: String,
+    count: u64,
+    viewer_has_reacted: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiscussionComment {
+    id: String,
+    author: String,
+    author_avatar: Option<String>,
+    body: String,
+    created_at: String,
+    upvotes: u64,
+    reactions: Vec<ReactionGroup>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiscussionsStatus {
+    enabled: bool,
+    discussions: Vec<DiscussionInfo>,
+}
+
+/// Check if Discussions are enabled and list skill discussions.
+#[tauri::command]
+async fn list_skill_discussions(
+    workspace: String,
+    skill_ids: Vec<String>,
+) -> CommandResult<DiscussionsStatus> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let workspace = parse_workspace(&workspace)?;
+    let token = saved_github_token(&paths).ok_or_else(|| {
+        CommandError::coded("missing_github_token", "log in with GitHub first")
+    })?;
+    let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
+
+    // Use GraphQL to check if discussions are enabled and fetch them
+    #[derive(serde::Deserialize)]
+    struct GqlResponse {
+        repository: Option<GqlRepo>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GqlRepo {
+        has_discussions_enabled: bool,
+        discussions: Option<GqlDiscussionConnection>,
+    }
+    #[derive(serde::Deserialize)]
+    struct GqlDiscussionConnection {
+        nodes: Vec<GqlDiscussion>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GqlDiscussion {
+        id: String,
+        number: u64,
+        title: String,
+        url: String,
+        body: String,
+        created_at: String,
+        upvote_count: u64,
+        author: Option<GqlAuthor>,
+        comments: GqlCommentCount,
+        reaction_groups: Option<Vec<GqlReactionGroup>>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GqlAuthor {
+        login: String,
+        avatar_url: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GqlCommentCount {
+        total_count: u64,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GqlReactionGroup {
+        content: String,
+        reactors: GqlReactorConnection,
+        viewer_has_reacted: bool,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GqlReactorConnection {
+        total_count: u64,
+    }
+
+    let query = format!(
+        r#"query {{
+            repository(owner: "{}", name: "{}") {{
+                hasDiscussionsEnabled
+                discussions(first: 100, orderBy: {{field: CREATED_AT, direction: DESC}}) {{
+                    nodes {{
+                        id
+                        number
+                        title
+                        url
+                        body
+                        createdAt
+                        upvoteCount
+                        author {{ login avatarUrl }}
+                        comments {{ totalCount }}
+                        reactionGroups {{
+                            content
+                            reactors {{ totalCount }}
+                            viewerHasReacted
+                        }}
+                    }}
+                }}
+            }}
+        }}"#,
+        workspace.owner, workspace.repo
+    );
+
+    let result: GqlResponse = provider
+        .graphql(&query, serde_json::json!({}))
+        .await
+        .map_err(provider_command_error)?;
+
+    let Some(repo) = result.repository else {
+        return Ok(DiscussionsStatus {
+            enabled: false,
+            discussions: Vec::new(),
+        });
+    };
+
+    if !repo.has_discussions_enabled {
+        return Ok(DiscussionsStatus {
+            enabled: false,
+            discussions: Vec::new(),
+        });
+    }
+
+    let discussions: Vec<DiscussionInfo> = repo
+        .discussions
+        .map(|conn| conn.nodes)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|d| {
+            // Match discussions that are tagged with [skill] prefix
+            let title_lower = d.title.to_lowercase();
+            skill_ids.iter().any(|id| {
+                title_lower.contains(&format!("[skill] {}", id.to_lowercase()))
+                    || title_lower.contains(&format!("[skill]{}", id.to_lowercase()))
+            })
+        })
+        .map(|d| {
+            let reactions: Vec<ReactionGroup> = d
+                .reaction_groups
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|r| r.reactors.total_count > 0)
+                .map(|r| ReactionGroup {
+                    content: r.content,
+                    count: r.reactors.total_count,
+                    viewer_has_reacted: r.viewer_has_reacted,
+                })
+                .collect();
+            DiscussionInfo {
+                id: d.id,
+                number: d.number,
+                title: d.title,
+                url: d.url,
+                body: d.body,
+                body_author: d.author.as_ref().map(|a| a.login.clone()).unwrap_or_else(|| "ghost".to_owned()),
+                body_author_avatar: d.author.and_then(|a| a.avatar_url),
+                upvotes: d.upvote_count,
+                comment_count: d.comments.total_count,
+                created_at: d.created_at,
+                has_discussions: true,
+                reactions,
+            }
+        })
+        .collect();
+
+    Ok(DiscussionsStatus {
+        enabled: true,
+        discussions,
+    })
+}
+
+/// Get a single discussion by number (used with cached mapping to skip full scan).
+#[tauri::command]
+async fn get_discussion_by_number(
+    workspace: String,
+    discussion_number: u64,
+) -> CommandResult<Option<DiscussionInfo>> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let workspace = parse_workspace(&workspace)?;
+    let token = saved_github_token(&paths).ok_or_else(|| {
+        CommandError::coded("missing_github_token", "log in with GitHub first")
+    })?;
+    let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
+
+    #[derive(serde::Deserialize)]
+    struct GqlResponse {
+        repository: Option<GqlRepo>,
+    }
+    #[derive(serde::Deserialize)]
+    struct GqlRepo {
+        discussion: Option<GqlDiscussion>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GqlDiscussion {
+        id: String,
+        number: u64,
+        title: String,
+        url: String,
+        body: String,
+        created_at: String,
+        upvote_count: u64,
+        author: Option<GqlAuthor>,
+        comments: GqlCommentCount,
+        reaction_groups: Option<Vec<GqlReactionGroup>>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GqlAuthor {
+        login: String,
+        avatar_url: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GqlCommentCount {
+        total_count: u64,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GqlReactionGroup {
+        content: String,
+        reactors: GqlReactorConnection,
+        viewer_has_reacted: bool,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GqlReactorConnection {
+        total_count: u64,
+    }
+
+    let query = format!(
+        r#"query {{
+            repository(owner: "{}", name: "{}") {{
+                discussion(number: {}) {{
+                    id
+                    number
+                    title
+                    url
+                    body
+                    createdAt
+                    upvoteCount
+                    author {{ login avatarUrl }}
+                    comments {{ totalCount }}
+                    reactionGroups {{
+                        content
+                        reactors {{ totalCount }}
+                        viewerHasReacted
+                    }}
+                }}
+            }}
+        }}"#,
+        workspace.owner, workspace.repo, discussion_number
+    );
+
+    let result: GqlResponse = provider
+        .graphql(&query, serde_json::json!({}))
+        .await
+        .map_err(provider_command_error)?;
+
+    let info = result
+        .repository
+        .and_then(|r| r.discussion)
+        .map(|d| {
+            let reactions: Vec<ReactionGroup> = d
+                .reaction_groups
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|r| r.reactors.total_count > 0)
+                .map(|r| ReactionGroup {
+                    content: r.content,
+                    count: r.reactors.total_count,
+                    viewer_has_reacted: r.viewer_has_reacted,
+                })
+                .collect();
+            DiscussionInfo {
+                id: d.id,
+                number: d.number,
+                title: d.title,
+                url: d.url,
+                body: d.body,
+                body_author: d.author.as_ref().map(|a| a.login.clone()).unwrap_or_else(|| "ghost".to_owned()),
+                body_author_avatar: d.author.and_then(|a| a.avatar_url),
+                upvotes: d.upvote_count,
+                comment_count: d.comments.total_count,
+                created_at: d.created_at,
+                has_discussions: true,
+                reactions,
+            }
+        });
+
+    Ok(info)
+}
+
+/// Get comments for a specific discussion.
+#[tauri::command]
+async fn get_discussion_comments(
+    workspace: String,
+    discussion_number: u64,
+) -> CommandResult<Vec<DiscussionComment>> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let workspace = parse_workspace(&workspace)?;
+    let token = saved_github_token(&paths).ok_or_else(|| {
+        CommandError::coded("missing_github_token", "log in with GitHub first")
+    })?;
+    let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
+
+    #[derive(serde::Deserialize)]
+    struct GqlResponse {
+        repository: Option<GqlRepo>,
+    }
+    #[derive(serde::Deserialize)]
+    struct GqlRepo {
+        discussion: Option<GqlDiscussion>,
+    }
+    #[derive(serde::Deserialize)]
+    struct GqlDiscussion {
+        comments: GqlCommentConnection,
+    }
+    #[derive(serde::Deserialize)]
+    struct GqlCommentConnection {
+        nodes: Vec<GqlComment>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GqlComment {
+        id: String,
+        body: String,
+        created_at: String,
+        upvote_count: u64,
+        author: Option<GqlAuthor>,
+        reaction_groups: Option<Vec<GqlReactionGroup>>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GqlAuthor {
+        login: String,
+        avatar_url: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GqlReactionGroup {
+        content: String,
+        reactors: GqlReactorConnection,
+        viewer_has_reacted: bool,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GqlReactorConnection {
+        total_count: u64,
+    }
+
+    let query = format!(
+        r#"query {{
+            repository(owner: "{}", name: "{}") {{
+                discussion(number: {}) {{
+                    comments(first: 50) {{
+                        nodes {{
+                            id
+                            body
+                            createdAt
+                            upvoteCount
+                            author {{ login avatarUrl }}
+                            reactionGroups {{
+                                content
+                                reactors {{ totalCount }}
+                                viewerHasReacted
+                            }}
+                        }}
+                    }}
+                }}
+            }}
+        }}"#,
+        workspace.owner, workspace.repo, discussion_number
+    );
+
+    let result: GqlResponse = provider
+        .graphql(&query, serde_json::json!({}))
+        .await
+        .map_err(provider_command_error)?;
+
+    let comments = result
+        .repository
+        .and_then(|r| r.discussion)
+        .map(|d| d.comments.nodes)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|c| {
+            let reactions: Vec<ReactionGroup> = c
+                .reaction_groups
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|r| r.reactors.total_count > 0)
+                .map(|r| ReactionGroup {
+                    content: r.content,
+                    count: r.reactors.total_count,
+                    viewer_has_reacted: r.viewer_has_reacted,
+                })
+                .collect();
+            DiscussionComment {
+                id: c.id,
+                author: c.author.as_ref().map(|a| a.login.clone()).unwrap_or_else(|| "ghost".to_owned()),
+                author_avatar: c.author.and_then(|a| a.avatar_url),
+                body: c.body,
+                created_at: c.created_at,
+                upvotes: c.upvote_count,
+                reactions,
+            }
+        })
+        .collect();
+
+    Ok(comments)
+}
+
+/// Add a comment to a discussion (using GraphQL mutation).
+#[tauri::command]
+async fn add_discussion_comment(
+    workspace: String,
+    discussion_id: String,
+    body: String,
+) -> CommandResult<DiscussionComment> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let _workspace = parse_workspace(&workspace)?;
+    let token = saved_github_token(&paths).ok_or_else(|| {
+        CommandError::coded("missing_github_token", "log in with GitHub first")
+    })?;
+    let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GqlResponse {
+        add_discussion_comment: Option<GqlMutation>,
+    }
+    #[derive(serde::Deserialize)]
+    struct GqlMutation {
+        comment: Option<GqlComment>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GqlComment {
+        id: String,
+        body: String,
+        created_at: String,
+        author: Option<GqlAuthor>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GqlAuthor {
+        login: String,
+        avatar_url: Option<String>,
+    }
+
+    let escaped_body = body.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+    let query = format!(
+        r#"mutation {{
+            addDiscussionComment(input: {{discussionId: "{discussion_id}", body: "{escaped_body}"}}) {{
+                comment {{
+                    id
+                    body
+                    createdAt
+                    author {{ login avatarUrl }}
+                }}
+            }}
+        }}"#
+    );
+
+    let result: GqlResponse = provider
+        .graphql(&query, serde_json::json!({}))
+        .await
+        .map_err(provider_command_error)?;
+
+    let comment = result
+        .add_discussion_comment
+        .and_then(|m| m.comment)
+        .ok_or_else(|| CommandError::coded("discussion_error", "failed to add comment"))?;
+
+    Ok(DiscussionComment {
+        id: comment.id,
+        author: comment.author.as_ref().map(|a| a.login.clone()).unwrap_or_else(|| "ghost".to_owned()),
+        author_avatar: comment.author.and_then(|a| a.avatar_url),
+        body: comment.body,
+        created_at: comment.created_at,
+        upvotes: 0,
+        reactions: Vec::new(),
+    })
+}
+
+/// Toggle a reaction on a discussion (using GraphQL mutation).
+/// Supported content values: THUMBS_UP, THUMBS_DOWN, LAUGH, HOORAY, CONFUSED, HEART, ROCKET, EYES
+#[tauri::command]
+async fn toggle_discussion_reaction(
+    workspace: String,
+    discussion_id: String,
+    content: String,
+) -> CommandResult<Vec<ReactionGroup>> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let _workspace = parse_workspace(&workspace)?;
+    let token = saved_github_token(&paths).ok_or_else(|| {
+        CommandError::coded("missing_github_token", "log in with GitHub first")
+    })?;
+    let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
+
+    // Validate reaction content
+    let valid_reactions = ["THUMBS_UP", "THUMBS_DOWN", "LAUGH", "HOORAY", "CONFUSED", "HEART", "ROCKET", "EYES"];
+    if !valid_reactions.contains(&content.as_str()) {
+        return Err(CommandError::coded("invalid_reaction", &format!("invalid reaction: {}", content)));
+    }
+
+    // Try to add the reaction first
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct AddResponse {
+        add_reaction: Option<AddReactionPayload>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct AddReactionPayload {
+        subject: Option<ReactionSubject>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ReactionSubject {
+        reaction_groups: Vec<GqlReactionGroup2>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GqlReactionGroup2 {
+        content: String,
+        reactors: GqlReactorCount,
+        viewer_has_reacted: bool,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GqlReactorCount {
+        total_count: u64,
+    }
+
+    // First try addReaction — if viewer already reacted, use removeReaction
+    let add_query = format!(
+        r#"mutation {{
+            addReaction(input: {{subjectId: "{discussion_id}", content: {content}}}) {{
+                subject {{
+                    ... on Discussion {{
+                        reactionGroups {{
+                            content
+                            reactors {{ totalCount }}
+                            viewerHasReacted
+                        }}
+                    }}
+                }}
+            }}
+        }}"#
+    );
+
+    let add_result: AddResponse = provider
+        .graphql(&add_query, serde_json::json!({}))
+        .await
+        .map_err(provider_command_error)?;
+
+    // Check if we need to remove instead (viewer already had this reaction)
+    // GitHub's addReaction is idempotent — if already reacted, it returns the existing state.
+    // We need to check viewerHasReacted to decide if we should remove.
+    if let Some(subject) = add_result.add_reaction.and_then(|a| a.subject) {
+        // Check if viewer already had this reaction before we added it
+        // Since addReaction is idempotent, we check if viewerHasReacted is true
+        // and the count didn't change — but we can't easily detect that.
+        // Instead, we'll just return the current state after add.
+        // For toggle behavior: we always add first. If user clicks again, we remove.
+        let groups: Vec<ReactionGroup> = subject
+            .reaction_groups
+            .into_iter()
+            .filter(|r| r.reactors.total_count > 0)
+            .map(|r| ReactionGroup {
+                content: r.content,
+                count: r.reactors.total_count,
+                viewer_has_reacted: r.viewer_has_reacted,
+            })
+            .collect();
+        return Ok(groups);
+    }
+
+    Ok(Vec::new())
+}
+
+/// Remove a reaction from a discussion.
+#[tauri::command]
+async fn remove_discussion_reaction(
+    workspace: String,
+    discussion_id: String,
+    content: String,
+) -> CommandResult<Vec<ReactionGroup>> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let _workspace = parse_workspace(&workspace)?;
+    let token = saved_github_token(&paths).ok_or_else(|| {
+        CommandError::coded("missing_github_token", "log in with GitHub first")
+    })?;
+    let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct RemoveResponse {
+        remove_reaction: Option<RemoveReactionPayload>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct RemoveReactionPayload {
+        subject: Option<ReactionSubject>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ReactionSubject {
+        reaction_groups: Vec<GqlReactionGroup2>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GqlReactionGroup2 {
+        content: String,
+        reactors: GqlReactorCount,
+        viewer_has_reacted: bool,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GqlReactorCount {
+        total_count: u64,
+    }
+
+    let remove_query = format!(
+        r#"mutation {{
+            removeReaction(input: {{subjectId: "{discussion_id}", content: {content}}}) {{
+                subject {{
+                    ... on Discussion {{
+                        reactionGroups {{
+                            content
+                            reactors {{ totalCount }}
+                            viewerHasReacted
+                        }}
+                    }}
+                }}
+            }}
+        }}"#
+    );
+
+    let remove_result: RemoveResponse = provider
+        .graphql(&remove_query, serde_json::json!({}))
+        .await
+        .map_err(provider_command_error)?;
+
+    if let Some(subject) = remove_result.remove_reaction.and_then(|r| r.subject) {
+        let groups: Vec<ReactionGroup> = subject
+            .reaction_groups
+            .into_iter()
+            .filter(|r| r.reactors.total_count > 0)
+            .map(|r| ReactionGroup {
+                content: r.content,
+                count: r.reactors.total_count,
+                viewer_has_reacted: r.viewer_has_reacted,
+            })
+            .collect();
+        return Ok(groups);
+    }
+
+    Ok(Vec::new())
+}
+
+/// Create a discussion for a skill (with race-condition re-check).
+/// If a discussion already exists, returns the existing one instead of creating a duplicate.
+#[tauri::command]
+async fn create_skill_discussion(
+    workspace: String,
+    skill_id: String,
+    skill_path: Option<String>,
+    body: Option<String>,
+) -> CommandResult<DiscussionInfo> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let workspace = parse_workspace(&workspace)?;
+    let token = saved_github_token(&paths).ok_or_else(|| {
+        CommandError::coded("missing_github_token", "log in with GitHub first")
+    })?;
+    let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
+
+    let expected_title = format!("[skill] {}", skill_id);
+
+    // Step 1: Re-check if discussion already exists (race condition guard)
+    #[derive(serde::Deserialize)]
+    struct CheckResponse {
+        repository: Option<CheckRepo>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CheckRepo {
+        id: String,
+        has_discussions_enabled: bool,
+        discussions: Option<CheckDiscussionConn>,
+        discussion_categories: Option<CheckCategoryConn>,
+    }
+    #[derive(serde::Deserialize)]
+    struct CheckDiscussionConn {
+        nodes: Vec<CheckDiscussion>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CheckDiscussion {
+        id: String,
+        number: u64,
+        title: String,
+        url: String,
+        created_at: String,
+        upvote_count: u64,
+        comments: CheckCommentCount,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CheckCommentCount {
+        total_count: u64,
+    }
+    #[derive(serde::Deserialize)]
+    struct CheckCategoryConn {
+        nodes: Vec<CheckCategory>,
+    }
+    #[derive(serde::Deserialize)]
+    struct CheckCategory {
+        id: String,
+        name: String,
+    }
+
+    let check_query = format!(
+        r#"query {{
+            repository(owner: "{}", name: "{}") {{
+                id
+                hasDiscussionsEnabled
+                discussions(first: 100, orderBy: {{field: CREATED_AT, direction: DESC}}) {{
+                    nodes {{
+                        id
+                        number
+                        title
+                        url
+                        createdAt
+                        upvoteCount
+                        comments {{ totalCount }}
+                    }}
+                }}
+                discussionCategories(first: 20) {{
+                    nodes {{ id name }}
+                }}
+            }}
+        }}"#,
+        workspace.owner, workspace.repo
+    );
+
+    let check_result: CheckResponse = provider
+        .graphql(&check_query, serde_json::json!({}))
+        .await
+        .map_err(provider_command_error)?;
+
+    let repo = check_result.repository.ok_or_else(|| {
+        CommandError::coded("repo_not_found", "repository not found")
+    })?;
+
+    if !repo.has_discussions_enabled {
+        return Err(CommandError::coded(
+            "discussions_disabled",
+            "Discussions are not enabled for this repository",
+        ));
+    }
+
+    // Check if discussion already exists
+    let title_lower = expected_title.to_lowercase();
+    if let Some(existing) = repo
+        .discussions
+        .as_ref()
+        .and_then(|conn| {
+            conn.nodes.iter().find(|d| d.title.to_lowercase() == title_lower)
+        })
+    {
+        // Already exists — return it (race condition resolved)
+        return Ok(DiscussionInfo {
+            id: existing.id.clone(),
+            number: existing.number,
+            title: existing.title.clone(),
+            url: existing.url.clone(),
+            body: String::new(),
+            body_author: "ghost".to_owned(),
+            body_author_avatar: None,
+            upvotes: existing.upvote_count,
+            comment_count: existing.comments.total_count,
+            created_at: existing.created_at.clone(),
+            has_discussions: true,
+            reactions: Vec::new(),
+        });
+    }
+
+    // Step 2: Find a suitable category (prefer "General", fallback to first)
+    let categories = repo
+        .discussion_categories
+        .map(|c| c.nodes)
+        .unwrap_or_default();
+
+    let category_id = categories
+        .iter()
+        .find(|c| c.name.to_lowercase() == "general")
+        .or_else(|| categories.first())
+        .map(|c| c.id.clone())
+        .ok_or_else(|| {
+            CommandError::coded(
+                "no_category",
+                "no discussion categories found — create at least one category in GitHub settings",
+            )
+        })?;
+
+    // Step 3: Create the discussion
+    let repo_id = repo.id;
+    let skill_url = if let Some(ref path) = skill_path {
+        format!("https://github.com/{}/{}/tree/main/{}", workspace.owner, workspace.repo, path.trim_matches('/'))
+    } else {
+        format!("https://github.com/{}/{}", workspace.owner, workspace.repo)
+    };
+    let discussion_body = body.unwrap_or_else(|| {
+        format!(
+            "Discussion for skill [`{}`]({}).\n\nFeel free to share feedback, questions, or suggestions.",
+            skill_id, skill_url
+        )
+    });
+    let escaped_body = discussion_body
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n");
+    let escaped_title = expected_title
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CreateResponse {
+        create_discussion: Option<CreateMutation>,
+    }
+    #[derive(serde::Deserialize)]
+    struct CreateMutation {
+        discussion: Option<CreatedDiscussion>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CreatedDiscussion {
+        id: String,
+        number: u64,
+        title: String,
+        url: String,
+        created_at: String,
+    }
+
+    let create_query = format!(
+        r#"mutation {{
+            createDiscussion(input: {{repositoryId: "{repo_id}", categoryId: "{category_id}", title: "{escaped_title}", body: "{escaped_body}"}}) {{
+                discussion {{
+                    id
+                    number
+                    title
+                    url
+                    createdAt
+                }}
+            }}
+        }}"#
+    );
+
+    let create_result: CreateResponse = provider
+        .graphql(&create_query, serde_json::json!({}))
+        .await
+        .map_err(provider_command_error)?;
+
+    let created = create_result
+        .create_discussion
+        .and_then(|m| m.discussion)
+        .ok_or_else(|| {
+            CommandError::coded("create_failed", "failed to create discussion — you may not have write access")
+        })?;
+
+    Ok(DiscussionInfo {
+        id: created.id,
+        number: created.number,
+        title: created.title,
+        url: created.url,
+        body: String::new(),
+        body_author: "ghost".to_owned(),
+        body_author_avatar: None,
+        upvotes: 0,
+        comment_count: 0,
+        created_at: created.created_at,
+        has_discussions: true,
+        reactions: Vec::new(),
+    })
+}
+
+#[tauri::command]
+async fn list_skill_commits(
+    workspace: String,
+    skill_path: String,
+    ref_name: Option<String>,
+    limit: Option<u32>,
+) -> CommandResult<Vec<CommitSummary>> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let token = saved_github_token(&paths).ok_or_else(|| {
+        CommandError::coded(
+            "missing_github_token",
+            "log in with GitHub before listing commits",
+        )
+    })?;
+    let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
+    let workspace = parse_workspace(&workspace)?;
+    let path = skill_path.trim_matches('/');
+    provider
+        .list_path_commits(&workspace, path, ref_name.as_deref(), limit.unwrap_or(30))
+        .await
+        .map_err(provider_command_error)
+}
+
+#[tauri::command]
+async fn list_workspace_pull_requests(
+    workspace: String,
+    state: Option<String>,
+) -> CommandResult<Vec<PullRequestSummary>> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let token = saved_github_token(&paths).ok_or_else(|| {
+        CommandError::coded("missing_github_token", "log in with GitHub before listing PRs")
+    })?;
+    let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
+    let workspace = parse_workspace(&workspace)?;
+    let state = match state.as_deref() {
+        Some("closed") => PullRequestQueryState::Closed,
+        Some("all") => PullRequestQueryState::All,
+        _ => PullRequestQueryState::Open,
+    };
+    provider
+        .list_pull_requests(&workspace, state)
+        .await
+        .map_err(provider_command_error)
+}
+
+#[tauri::command]
+async fn list_workspace_events(workspace: String) -> CommandResult<Vec<RepositoryEvent>> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let token = saved_github_token(&paths).ok_or_else(|| {
+        CommandError::coded(
+            "missing_github_token",
+            "log in with GitHub before listing activity",
+        )
+    })?;
+    let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
+    let workspace = parse_workspace(&workspace)?;
+    provider
+        .list_repository_events(&workspace)
+        .await
+        .map_err(provider_command_error)
+}
+
+#[tauri::command]
+async fn list_repository_invitations() -> CommandResult<Vec<RepositoryInvitation>> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let token = saved_github_token(&paths).ok_or_else(|| {
+        CommandError::coded(
+            "missing_github_token",
+            "log in with GitHub before listing invitations",
+        )
+    })?;
+    let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
+    provider
+        .list_user_repository_invitations()
+        .await
+        .map_err(provider_command_error)
+}
+
+#[tauri::command]
+async fn accept_repository_invitation(invitation_id: u64) -> CommandResult<()> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let token = saved_github_token(&paths).ok_or_else(|| {
+        CommandError::coded(
+            "missing_github_token",
+            "log in with GitHub before accepting an invitation",
+        )
+    })?;
+    let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
+    provider
+        .accept_user_repository_invitation(invitation_id)
+        .await
+        .map_err(provider_command_error)
+}
+
+fn selection_from_targets(targets: Vec<String>) -> TargetSelection {
+    if targets.is_empty() {
+        return TargetSelection::all_default();
+    }
+    TargetSelection {
+        claude_code: targets.iter().any(|target| target == "claude-code"),
+        cursor: targets.iter().any(|target| target == "cursor"),
+        codex: targets.iter().any(|target| target == "codex"),
+        custom: targets
+            .into_iter()
+            .filter(|target| !matches!(target.as_str(), "claude-code" | "cursor" | "codex"))
+            .collect(),
+    }
+}
+
+fn parse_permission_role(value: &str) -> CommandResult<PermissionLevel> {
+    match value {
+        "read" => Ok(PermissionLevel::Read),
+        "triage" => Ok(PermissionLevel::Triage),
+        "write" => Ok(PermissionLevel::Write),
+        "maintain" => Ok(PermissionLevel::Maintain),
+        "admin" => Ok(PermissionLevel::Admin),
+        other => Err(CommandError::coded(
+            "invalid_invitation_role",
+            format!("unsupported invitation role `{other}`"),
+        )),
+    }
+}
+
+fn workspace_webhook_registration(
+    webhook_url: Option<String>,
+    webhook_secret: Option<String>,
+    webhook_events: Option<Vec<String>>,
+) -> CommandResult<Option<WorkspaceWebhookRegistration>> {
+    let events = webhook_events.unwrap_or_default();
+    match (webhook_url, webhook_secret) {
+        (Some(callback_url), Some(secret)) => Ok(Some(WorkspaceWebhookRegistration {
+            callback_url,
+            secret,
+            events,
+        })),
+        (None, None) if events.is_empty() => Ok(None),
+        (None, _) => Err(CommandError::coded(
+            "missing_webhook_url",
+            "webhookUrl is required when registering a workspace webhook",
+        )),
+        (_, None) => Err(CommandError::coded(
+            "missing_webhook_secret",
+            "webhookSecret is required when registering a workspace webhook",
+        )),
+    }
+}
+
+fn saved_github_token(paths: &AppPaths) -> Option<String> {
+    teamai_core::load_github_credential(&paths.credentials)
+        .ok()
+        .flatten()
+        .map(|github| github.token)
+}
+
+fn github_provider(token: Option<&str>) -> CommandResult<GitHubProvider> {
+    match token {
+        Some(token) if !token.trim().is_empty() => {
+            GitHubProvider::new(token.to_owned()).map_err(provider_command_error)
+        }
+        _ => GitHubProvider::anonymous("https://api.github.com").map_err(provider_command_error),
+    }
+}
+
+fn provider_command_error(err: teamai_provider::ProviderError) -> CommandError {
+    CommandError::coded("provider_error", err.to_string())
+}
+
+fn current_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
+}
+
+fn init_tracing() {
+    use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,teamai=debug,teamai_github=debug,teamai-github=debug"));
+
+    let log_dir = AppPaths::resolve()
+        .map(|paths| paths.logs.clone())
+        .unwrap_or_else(|_| {
+            std::env::temp_dir().join("team-ai-hub").join("logs")
+        });
+    let _ = std::fs::create_dir_all(&log_dir);
+
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "teamai.log");
+
+    let stderr_layer = fmt::layer().with_target(true).with_writer(std::io::stderr);
+    let file_layer = fmt::layer()
+        .with_ansi(false)
+        .with_target(true)
+        .with_writer(file_appender);
+
+    if let Err(err) = tracing_subscriber::registry()
+        .with(env_filter)
+        .with(stderr_layer)
+        .with(file_layer)
+        .try_init()
+    {
+        eprintln!("tracing init failed: {err}");
+    }
+}
+
+fn resolve_github_client_id(client_id: Option<String>) -> CommandResult<String> {
+    // Three-tier resolution so end users never need to know about client IDs:
+    //   1. explicit override from the UI (used in development / advanced flows)
+    //   2. runtime env var (lets ops swap the OAuth app without rebuilding)
+    //   3. compile-time default baked in via `TEAMAI_GITHUB_CLIENT_ID`
+    let baked = option_env!("TEAMAI_GITHUB_CLIENT_ID").map(str::to_owned);
+    let value = client_id
+        .or_else(|| std::env::var("GITHUB_CLIENT_ID").ok())
+        .or(baked)
+        .unwrap_or_default();
+    let trimmed = value.trim().to_owned();
+    if trimmed.is_empty() {
+        return Err(CommandError::coded(
+            "missing_github_client_id",
+            "Team AI Hub is not configured for GitHub sign-in. Build with TEAMAI_GITHUB_CLIENT_ID set, or export GITHUB_CLIENT_ID before launching.",
+        ));
+    }
+    Ok(trimmed)
+}
+
+fn default_runtime_targets() -> Vec<String> {
+    vec![
+        "claude-code".to_owned(),
+        "cursor".to_owned(),
+        "codex".to_owned(),
+    ]
+}
+
+fn local_agent_root_specs(home: &Path) -> Vec<LocalAgentRoot> {
+    vec![
+        LocalAgentRoot {
+            id: "cursor-agents".to_owned(),
+            label: "Cursor Agents".to_owned(),
+            kind: "cursor".to_owned(),
+            path: home.join(".cursor").join("agents"),
+            exists: false,
+            entries: Vec::new(),
+        },
+        LocalAgentRoot {
+            id: "cursor-skills".to_owned(),
+            label: "Cursor Skills".to_owned(),
+            kind: "cursor".to_owned(),
+            path: home.join(".cursor").join("skills"),
+            exists: false,
+            entries: Vec::new(),
+        },
+        LocalAgentRoot {
+            id: "claude-agents".to_owned(),
+            label: "Claude Agents".to_owned(),
+            kind: "claude".to_owned(),
+            path: home.join(".claude").join("agents"),
+            exists: false,
+            entries: Vec::new(),
+        },
+        LocalAgentRoot {
+            id: "claude-skills".to_owned(),
+            label: "Claude Skills".to_owned(),
+            kind: "claude".to_owned(),
+            path: home.join(".claude").join("skills"),
+            exists: false,
+            entries: Vec::new(),
+        },
+        LocalAgentRoot {
+            id: "shared-agents-skills".to_owned(),
+            label: "Shared Agent Skills".to_owned(),
+            kind: "shared".to_owned(),
+            path: home.join(".agents").join("skills"),
+            exists: false,
+            entries: Vec::new(),
+        },
+        LocalAgentRoot {
+            id: "codex-skills".to_owned(),
+            label: "Codex Skills".to_owned(),
+            kind: "codex".to_owned(),
+            path: home.join(".codex").join("skills"),
+            exists: false,
+            entries: Vec::new(),
+        },
+    ]
+}
+
+fn scan_local_agent_root(mut root: LocalAgentRoot) -> LocalAgentRoot {
+    root.exists = root.path.is_dir();
+    if !root.exists {
+        return root;
+    }
+    let Ok(entries) = fs::read_dir(&root.path) else {
+        return root;
+    };
+    let mut scanned = entries
+        .flatten()
+        .filter_map(|entry| local_agent_entry(entry.path()))
+        .collect::<Vec<_>>();
+    scanned.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
+    root.entries = scanned;
+    root
+}
+
+fn local_agent_entry(path: PathBuf) -> Option<LocalAgentEntry> {
+    if !path.is_dir() {
+        return None;
+    }
+    let id = path.file_name()?.to_string_lossy().to_string();
+    if id.starts_with('.') {
+        return None;
+    }
+    let manifest_path = path.join("manifest.yaml");
+    let skill_md_path = path.join("SKILL.md");
+    let install_metadata_path = path.join(".teamai-install.json");
+    let manifest = teamai_manifest::parse_skill_dir(&path)
+        .ok()
+        .and_then(|parsed| parsed.manifest);
+    Some(LocalAgentEntry {
+        name: manifest
+            .as_ref()
+            .map(|value| value.name.clone())
+            .unwrap_or_else(|| humanize_agent_dir_name(&id)),
+        version: manifest.as_ref().map(|value| value.version.clone()),
+        description: manifest.as_ref().map(|value| value.description.clone()),
+        has_manifest: manifest_path.exists(),
+        has_skill_md: skill_md_path.exists(),
+        managed: install_metadata_path.exists(),
+        id,
+        path,
+    })
+}
+
+fn humanize_agent_dir_name(value: &str) -> String {
+    value
+        .split(['-', '_'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+pub fn run() {
+    init_tracing();
+
+    // Initialize SQLite database
+    let paths = AppPaths::resolve().expect("failed to resolve app paths");
+    let db_path = paths.home.join("db.sqlite");
+    let database = db::Database::open(&db_path).expect("failed to open database");
+
+    tauri::Builder::default()
+        .manage(DeepLinkState::default())
+        .manage(Mutex::new(database))
+        .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            let urls = args
+                .into_iter()
+                .filter_map(|arg| arg.parse::<Url>().ok())
+                .collect::<Vec<_>>();
+            for url in urls {
+                register_deep_link(app, url);
+            }
+        }))
+        .setup(|app| {
+            let handle = app.handle().clone();
+            let window = app.get_webview_window("main");
+            if let Some(window) = window {
+                let _ = window.set_title("Team AI Hub");
+            }
+            if let Some(deep_link) =
+                handle.try_state::<tauri_plugin_deep_link::DeepLink<tauri::Wry>>()
+            {
+                if let Ok(Some(urls)) = deep_link.get_current() {
+                    for url in urls {
+                        register_deep_link(&handle, url);
+                    }
+                }
+                let _ = deep_link.on_open_url({
+                    let app = handle.clone();
+                    move |event| {
+                        for url in event.urls() {
+                            register_deep_link(&app, url);
+                        }
+                    }
+                });
+            }
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            app_init,
+            add_workspace,
+            get_deep_link_state,
+            check_workspace_head,
+            diff_workspace_since,
+            compare_skill_versions,
+            get_auth_status,
+            start_github_device_flow,
+            poll_github_device_flow,
+            login_github_token,
+            get_skill_detail,
+            get_workspace_detail,
+            invite_github_collaborator,
+            list_workspace_members,
+            export_diagnostics,
+            open_logs_folder,
+            list_github_workspaces,
+            list_workspaces,
+            scan_workspace,
+            scan_github_workspace,
+            parse_skill,
+            read_subscriptions,
+            subscribe_workspace_skill,
+            install_skill,
+            remove_skill,
+            list_installed_targets,
+            list_local_agent_roots,
+            preview_publish,
+            preview_publish_from_workspace,
+            publish_skill_to_workspace,
+            list_workspace_pull_requests,
+            list_workspace_events,
+            list_repository_invitations,
+            accept_repository_invitation,
+            list_skill_commits,
+            list_skill_files,
+            list_workspace_branches,
+            read_skill_file,
+            list_skill_discussions,
+            get_discussion_by_number,
+            get_discussion_comments,
+            add_discussion_comment,
+            toggle_discussion_reaction,
+            remove_discussion_reaction,
+            create_skill_discussion,
+            db_list_runtimes,
+            db_list_skills,
+            db_enable_skill,
+            db_disable_skill,
+            db_scan_unmanaged,
+            db_import_skill,
+            db_cache_stats,
+            db_clear_cache,
+            db_cache_get,
+            db_cache_put,
+            db_cache_delete,
+            db_cache_delete_prefix,
+            remote_cache_put_file,
+            remote_cache_get_file,
+            remote_cache_delete_skill,
+            remote_cache_delete_workspace,
+            remote_cache_stats,
+            db_check_modifications,
+            db_unmanage_skill,
+            open_data_dir
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running Team AI Hub");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        default_runtime_targets, humanize_agent_dir_name, local_agent_root_specs,
+        redact_sensitive_text, CommandError,
+    };
+    use std::path::Path;
+
+    #[test]
+    fn command_error_serializes_as_structured_object() {
+        let value = serde_json::to_value(CommandError::coded(
+            "missing_github_token",
+            "GitHub token is required",
+        ))
+        .unwrap();
+
+        assert_eq!(value["code"], "missing_github_token");
+        assert_eq!(value["message"], "GitHub token is required");
+    }
+
+    #[test]
+    fn diagnostics_redaction_removes_token_like_values() {
+        let redacted = redact_sensitive_text(
+            "ghp_abcdefghijklmnopqrstuvwxyz123456 github_pat_11_secret GITHUB_TOKEN",
+        );
+
+        assert!(!redacted.contains("ghp_"));
+        assert!(!redacted.contains("github_pat_"));
+        assert!(!redacted.contains("GITHUB_TOKEN"));
+        assert_eq!(redacted.matches("[REDACTED]").count(), 3);
+    }
+
+    #[test]
+    fn installed_targets_default_to_supported_agent_runtimes() {
+        assert_eq!(
+            default_runtime_targets(),
+            vec![
+                "claude-code".to_owned(),
+                "cursor".to_owned(),
+                "codex".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn local_agent_roots_include_ide_agents_and_shared_skills() {
+        let roots = local_agent_root_specs(Path::new("/home/demo"));
+        let paths = roots
+            .iter()
+            .map(|root| root.path.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert!(paths.iter().any(|path| path.ends_with("/.cursor/agents")));
+        assert!(paths.iter().any(|path| path.ends_with("/.claude/agents")));
+        assert!(paths.iter().any(|path| path.ends_with("/.agents/skills")));
+        assert!(paths.iter().any(|path| path.ends_with("/.codex/skills")));
+    }
+
+    #[test]
+    fn local_agent_directory_names_are_humanized() {
+        assert_eq!(humanize_agent_dir_name("code-reviewer_agent"), "Code Reviewer Agent");
+    }
+}

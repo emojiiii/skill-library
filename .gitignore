@@ -1,0 +1,11 @@
+target/
+node_modules/
+dist/
+.vite/
+.DS_Store
+*.log
+.env
+.env.local
+apps/desktop/src-tauri/gen/
+apps/desktop/src-tauri/target/
+*.tsbuildinfo

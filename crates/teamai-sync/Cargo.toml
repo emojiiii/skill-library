@@ -1,0 +1,22 @@
+[package]
+name = "teamai-sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+teamai-core = { path = "../teamai-core" }
+teamai-installer = { path = "../teamai-installer" }
+teamai-manifest = { path = "../teamai-manifest" }
+teamai-provider = { path = "../teamai-provider" }
+teamai-provider-github = { path = "../teamai-provider-github" }
+tempfile.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

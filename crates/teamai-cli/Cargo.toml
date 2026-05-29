@@ -1,0 +1,28 @@
+[package]
+name = "teamai-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "teamai"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+teamai-core = { path = "../teamai-core" }
+teamai-installer = { path = "../teamai-installer" }
+teamai-manifest = { path = "../teamai-manifest" }
+teamai-publish = { path = "../teamai-publish" }
+teamai-provider = { path = "../teamai-provider" }
+teamai-provider-github = { path = "../teamai-provider-github" }
+teamai-sync = { path = "../teamai-sync" }
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

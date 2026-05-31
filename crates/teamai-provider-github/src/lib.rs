@@ -272,6 +272,29 @@ impl GitHubProvider {
         ref_name: &str,
         destination: impl AsRef<Path>,
     ) -> Result<GitHubArchiveDownload> {
+        self.download_tarball_with_progress(reference, ref_name, destination, |_, _| {})
+            .await
+    }
+
+    /// Stream the repository tarball, invoking `on_progress(downloaded, total)`
+    /// as bytes arrive so callers can surface real download progress.
+    ///
+    /// `total` is the response `Content-Length` when the server provides it.
+    /// GitHub's codeload redirect target frequently uses chunked transfer with
+    /// no length, in which case `total` is `None` and only the running byte
+    /// count is meaningful (the UI should fall back to an indeterminate bar).
+    pub async fn download_tarball_with_progress<F>(
+        &self,
+        reference: &WorkspaceRef,
+        ref_name: &str,
+        destination: impl AsRef<Path>,
+        mut on_progress: F,
+    ) -> Result<GitHubArchiveDownload>
+    where
+        F: FnMut(u64, Option<u64>),
+    {
+        use futures::StreamExt;
+
         let url = format!(
             "{}/repos/{}/{}/tarball/{}",
             self.api_base, reference.owner, reference.repo, ref_name
@@ -289,18 +312,28 @@ impl GitHubProvider {
             let message = response.text().await.unwrap_or_else(|_| status.to_string());
             return Err(provider_error_from_status(status, message));
         }
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|err| ProviderError::NetworkError {
+
+        let total = response.content_length();
+        let mut buf: Vec<u8> = Vec::with_capacity(total.unwrap_or(0) as usize);
+        let mut downloaded: u64 = 0;
+        on_progress(0, total);
+
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|err| ProviderError::NetworkError {
                 cause: err.to_string(),
             })?;
-        let sha256 = hex::encode(Sha256::digest(&bytes));
-        let extracted_root = extract_tarball(bytes.as_ref(), destination.as_ref())?;
+            downloaded += chunk.len() as u64;
+            buf.extend_from_slice(&chunk);
+            on_progress(downloaded, total);
+        }
+
+        let sha256 = hex::encode(Sha256::digest(&buf));
+        let extracted_root = extract_tarball(&buf, destination.as_ref())?;
         Ok(GitHubArchiveDownload {
             ref_name: ref_name.to_owned(),
             sha256,
-            bytes: bytes.len() as u64,
+            bytes: buf.len() as u64,
             extracted_root,
         })
     }
@@ -1311,7 +1344,16 @@ fn extract_tarball(bytes: &[u8], destination: &Path) -> Result<PathBuf> {
             .map_err(|err| ProviderError::InvalidResponse(err.to_string()))?
             .to_path_buf();
         validate_archive_path(&path)?;
-        if top_level.is_none() {
+        // git's `tarball` archives begin with a `pax_global_header` pseudo-entry
+        // (a PAX global extended header carrying the commit sha). It is NOT the
+        // repository directory — skip it when detecting the real top-level dir,
+        // otherwise `extracted_root` points at a non-existent `pax_global_header`
+        // path and every later read fails with "os error 3" on Windows.
+        let entry_type = entry.header().entry_type();
+        let is_pax_header = entry_type.is_pax_global_extensions()
+            || entry_type.is_pax_local_extensions()
+            || path.as_os_str() == "pax_global_header";
+        if top_level.is_none() && !is_pax_header {
             top_level = path.components().next().map(|component| {
                 let mut root = PathBuf::new();
                 root.push(component.as_os_str());
@@ -1733,6 +1775,71 @@ mod tests {
             secret: String::new(),
         })
         .is_err());
+    }
+
+    #[test]
+    fn extract_tarball_skips_pax_global_header_for_top_level() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        // Build a gzip tarball shaped like GitHub's `tarball` archives: a leading
+        // `pax_global_header` pseudo-entry (PAX global extended header carrying the
+        // commit sha), followed by the real `<owner>-<repo>-<sha>/` tree. The bug
+        // was treating that first pseudo-entry as the top-level dir, so
+        // `extracted_root` pointed at a non-existent `pax_global_header` path and
+        // every later read failed with os error 3 on Windows.
+        let mut tar_buf = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_buf);
+
+            // pax_global_header pseudo-entry.
+            let pax_payload = b"52 comment=387020e0000000000000000000000000000000\n";
+            let mut pax_header = tar::Header::new_ustar();
+            pax_header.set_size(pax_payload.len() as u64);
+            pax_header.set_entry_type(tar::EntryType::new(b'g'));
+            pax_header.set_cksum();
+            builder
+                .append_data(&mut pax_header, "pax_global_header", &pax_payload[..])
+                .unwrap();
+
+            // Real repository tree under owner-repo-sha/.
+            let skill_md = b"---\nid: nested-skill\ntype: skill\nname: Nested\ndescription: A nested skill.\nversion: 0.1.0\ntargets:\n  - claude-code\n---\n# Nested\n";
+            let mut md_header = tar::Header::new_ustar();
+            md_header.set_size(skill_md.len() as u64);
+            md_header.set_entry_type(tar::EntryType::Regular);
+            md_header.set_mode(0o644);
+            md_header.set_cksum();
+            builder
+                .append_data(
+                    &mut md_header,
+                    "owner-repo-387020e/skills/cat/nested-skill/SKILL.md",
+                    &skill_md[..],
+                )
+                .unwrap();
+            builder.finish().unwrap();
+        }
+
+        let mut gz = GzEncoder::new(Vec::new(), Compression::fast());
+        gz.write_all(&tar_buf).unwrap();
+        let gz_bytes = gz.finish().unwrap();
+
+        let dest = tempfile::tempdir().unwrap();
+        let extracted_root = extract_tarball(&gz_bytes, dest.path()).unwrap();
+
+        // Must point at the real tree, not pax_global_header, and exist on disk.
+        assert_eq!(
+            extracted_root.file_name().and_then(|n| n.to_str()),
+            Some("owner-repo-387020e"),
+            "extracted_root should be the real repo dir, got {extracted_root:?}"
+        );
+        assert!(extracted_root.is_dir(), "extracted_root must exist as a dir");
+        assert!(
+            extracted_root
+                .join("skills/cat/nested-skill/SKILL.md")
+                .exists(),
+            "nested skill must be readable under extracted_root"
+        );
     }
 
     #[test]

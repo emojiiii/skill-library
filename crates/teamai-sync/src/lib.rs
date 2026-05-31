@@ -993,6 +993,101 @@ async fn download_skill_source(
     })
 }
 
+/// A skill downloaded from a workspace and located on disk, ready to be copied
+/// into the local data directory and linked into agent tool folders.
+#[derive(Debug, Clone)]
+pub struct PreparedSkillDownload {
+    /// Absolute path to the located skill directory inside the extracted tarball.
+    pub source_dir: PathBuf,
+    /// sha256 of the downloaded tarball (for provenance / change detection).
+    pub source_hash: String,
+    /// The git ref actually downloaded (a tag when matched, else default branch).
+    pub ref_name: String,
+    /// The skill's parsed manifest.
+    pub manifest: teamai_manifest::SkillManifest,
+}
+
+/// Download a single skill from a workspace and locate its directory, reporting
+/// byte-level download progress via `on_progress(downloaded, total)`.
+///
+/// The skill is located either by the caller-supplied in-repo `skill_path`
+/// (preferred — resolved by the discover detail view) or, failing that, by a
+/// recursive workspace scan matching the manifest id. The recursive scan is what
+/// makes nested skills (e.g. `skills/category/the-skill/`) locatable; a flat
+/// one-level scan was the cause of the historical "os error 3" install failures.
+///
+/// This is the building block for the async, progress-reporting install path. It
+/// performs the network + extraction only; copying into the data dir and linking
+/// into tool folders is the caller's responsibility.
+pub async fn download_skill_for_install<F>(
+    paths: &AppPaths,
+    workspace: &WorkspaceRef,
+    asset_id: &str,
+    skill_path: Option<&str>,
+    version: &str,
+    token: Option<&str>,
+    on_progress: F,
+) -> Result<PreparedSkillDownload>
+where
+    F: FnMut(u64, Option<u64>),
+{
+    let provider = github_provider(workspace, token)?;
+    let git_ref = resolve_download_ref(&provider, workspace, version).await?;
+    let cache_dir = paths
+        .workspaces
+        .join(workspace.storage_key())
+        .join("cache")
+        .join(safe_filename(&git_ref));
+    if cache_dir.exists() {
+        fs::remove_dir_all(&cache_dir)?;
+    }
+    fs::create_dir_all(&cache_dir)?;
+    let archive = provider
+        .download_tarball_with_progress(workspace, &git_ref, &cache_dir, on_progress)
+        .await
+        .map_err(sync_provider_error)?;
+
+    // Prefer the caller-supplied path (already resolved by discover detail).
+    let by_path = skill_path
+        .map(str::trim)
+        .map(|p| p.trim_matches('/'))
+        .filter(|p| !p.is_empty())
+        .map(|p| archive.extracted_root.join(p))
+        .filter(|dir| dir.exists());
+
+    let (source_dir, manifest) = if let Some(dir) = by_path {
+        let parsed = teamai_manifest::parse_skill_dir(&dir)?;
+        match parsed.manifest {
+            Some(manifest) => (dir, manifest),
+            // Path exists but isn't a valid skill → fall back to id scan.
+            None => locate_skill_by_id(&archive.extracted_root, asset_id)?,
+        }
+    } else {
+        locate_skill_by_id(&archive.extracted_root, asset_id)?
+    };
+
+    Ok(PreparedSkillDownload {
+        source_dir,
+        source_hash: format!("sha256:{}", archive.sha256),
+        ref_name: git_ref,
+        manifest,
+    })
+}
+
+/// Recursively scan an extracted workspace and return the skill matching
+/// `asset_id` along with its parsed manifest.
+fn locate_skill_by_id(
+    extracted_root: &Path,
+    asset_id: &str,
+) -> Result<(PathBuf, teamai_manifest::SkillManifest)> {
+    let assets = teamai_manifest::scan_workspace(extracted_root)?;
+    let asset = assets
+        .into_iter()
+        .find(|asset| asset.manifest.id == asset_id)
+        .ok_or_else(|| SyncError::NotFound(asset_id.to_owned()))?;
+    Ok((extracted_root.join(asset.path), asset.manifest))
+}
+
 /// A skill's full source tree, downloaded and cached locally, ready to feed to
 /// the AI reviewer. The whole repo tarball is fetched once per resolved commit
 /// and extracted under `workspaces/{key}/review-cache/{sha}`; we point at the

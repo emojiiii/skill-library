@@ -823,6 +823,19 @@ export interface ManagedSkill {
   isModified: boolean;
   installedAt: string;
   updatedAt: string;
+  /** 'downloading' | 'installed' | 'error' */
+  installStatus: "downloading" | "installed" | "error";
+  /** 0..=100, or -1 when the stream length is unknown (indeterminate bar). */
+  downloadProgress: number;
+  downloadError: string;
+  /** '' (never reviewed) | 'safe' | 'caution' | 'danger' */
+  reviewVerdict: "" | "safe" | "caution" | "danger";
+  reviewSummary: string;
+  reviewFindings: AiReviewFinding[];
+  /** RFC3339 timestamp of the last review, or '' if never reviewed. */
+  reviewedAt: string;
+  /** True when a review exists but the skill changed since (verdict is stale). */
+  reviewStale: boolean;
   targets: ManagedSkillTarget[];
 }
 
@@ -880,6 +893,45 @@ export async function dbScanUnmanaged(): Promise<UnmanagedSkillInfo[]> {
 export async function dbImportSkill(skillId: string, sourcePath: string, linkMode?: string): Promise<ManagedSkill> {
   if (!isTauri) return desktopOnly("Import skill");
   return invoke("db_import_skill", { skillId, sourcePath, linkMode });
+}
+
+export interface SkillDownloadProgress {
+  skillId: string;
+  status: "downloading" | "installed" | "error";
+  /** 0..=100, or -1 when the stream length is unknown (indeterminate bar). */
+  progress: number;
+  error?: string | null;
+}
+
+/**
+ * Start an asynchronous download + install of a remote skill. Returns
+ * immediately after recording a 'downloading' row; progress arrives via
+ * `onSkillDownloadProgress`. Empty `targets` = download locally, deploy nowhere.
+ *
+ * Throws a coded error ("already_downloading" / "already_installed") when the
+ * skill is already present, so the caller can show a notice instead of a
+ * redundant download.
+ */
+export async function downloadSkillAsync(args: {
+  workspace: string;
+  assetId: string;
+  skillPath?: string;
+  version?: string;
+  name?: string;
+  description?: string;
+  targets: string[];
+  linkMode?: string;
+}): Promise<void> {
+  if (!isTauri) return desktopOnly("Download skill");
+  return invoke("download_skill_async", args);
+}
+
+/** Listen for async download progress events. */
+export async function onSkillDownloadProgress(
+  handler: (progress: SkillDownloadProgress) => void,
+): Promise<() => void> {
+  if (!isTauri) return () => undefined;
+  return listen<SkillDownloadProgress>("skill-download-progress", (event) => handler(event.payload));
 }
 
 /** Get cache size breakdown by workspace (from SQLite). */
@@ -1180,4 +1232,19 @@ export async function hasAiKey(): Promise<boolean> {
 export async function reviewSkill(request: AiReviewRequest): Promise<AiReviewResult> {
   if (!isTauri) return desktopOnly("AI review");
   return invoke("review_skill", { request });
+}
+
+/**
+ * Review an already-installed ("My Skills") skill straight from its local copy
+ * on disk — no GitHub download. The verdict + findings are cached back into
+ * SQLite (visible on the next dbListSkills) and also returned here.
+ */
+export async function reviewLocalSkill(args: {
+  skillId: string;
+  provider: string;
+  baseUrl: string;
+  model: string;
+}): Promise<AiReviewResult> {
+  if (!isTauri) return desktopOnly("AI review");
+  return invoke("review_local_skill", args);
 }

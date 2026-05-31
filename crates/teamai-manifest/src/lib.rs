@@ -202,31 +202,91 @@ pub fn parse_skill_dir(path: impl AsRef<Path>) -> Result<ManifestParseResult> {
     })
 }
 
+/// Maximum directory depth to descend when scanning a workspace for skills.
+/// Skills nested under category folders (e.g. `skills/dota2/abilities/`) must be
+/// found, but we bound recursion so a pathological tree can't run away.
+const MAX_SCAN_DEPTH: usize = 8;
+
+/// Directory names we never descend into while scanning for skills. These hold
+/// vendored deps, build output, or VCS metadata and never contain skills.
+const SCAN_SKIP_DIRS: &[&str] = &[
+    ".git",
+    ".github",
+    ".hg",
+    ".svn",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    "out",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".next",
+    ".cache",
+];
+
+/// True when `dir` directly contains a skill definition (SKILL.md or a manifest
+/// file). Such a directory is a skill leaf: we parse it and stop descending.
+fn is_skill_dir(dir: &Path) -> bool {
+    dir.join("SKILL.md").exists() || find_manifest_file(dir).is_some()
+}
+
+/// Recursively discover all skills under `root`.
+///
+/// Skills are frequently nested under category folders (the bug behind
+/// "os error 3" was a one-level scan that couldn't locate
+/// `skills/dota2-arcade/dota2-arcade-abilities-items/`). We walk the tree until
+/// we hit a directory that *is* a skill (contains SKILL.md or a manifest), parse
+/// it, and do not descend further into it. Noise directories are skipped and the
+/// depth is bounded by [`MAX_SCAN_DEPTH`].
 pub fn scan_workspace(path: impl AsRef<Path>) -> Result<Vec<SkillAsset>> {
     let root = path.as_ref();
     let mut assets = Vec::new();
+    scan_workspace_inner(root, root, 0, &mut assets)?;
+    assets.sort_by(|a, b| a.manifest.id.cmp(&b.manifest.id));
+    Ok(assets)
+}
 
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let result = parse_skill_dir(&path)?;
+fn scan_workspace_inner(
+    root: &Path,
+    dir: &Path,
+    depth: usize,
+    assets: &mut Vec<SkillAsset>,
+) -> Result<()> {
+    // If this directory is itself a skill, parse it and stop — a skill's own
+    // subfolders (assets, scripts, etc.) are not separate skills.
+    if depth > 0 && is_skill_dir(dir) {
+        let result = parse_skill_dir(dir)?;
         if let Some(manifest) = result.manifest {
             assets.push(SkillAsset {
-                path: path
-                    .strip_prefix(root)
-                    .unwrap_or(path.as_path())
-                    .to_path_buf(),
+                path: dir.strip_prefix(root).unwrap_or(dir).to_path_buf(),
                 manifest,
                 warnings: result.warnings,
             });
         }
+        return Ok(());
     }
 
-    assets.sort_by(|a, b| a.manifest.id.cmp(&b.manifest.id));
-    Ok(assets)
+    if depth >= MAX_SCAN_DEPTH {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let child = entry.path();
+        if !child.is_dir() {
+            continue;
+        }
+        if let Some(name) = child.file_name().and_then(|n| n.to_str()) {
+            if SCAN_SKIP_DIRS.contains(&name) {
+                continue;
+            }
+        }
+        scan_workspace_inner(root, &child, depth + 1, assets)?;
+    }
+
+    Ok(())
 }
 
 pub fn semantic_diff(from: &SkillManifest, to: &SkillManifest) -> Vec<SemanticChange> {
@@ -602,6 +662,53 @@ targets:
         let parsed = parse_skill_dir(dir.path()).unwrap();
         assert!(parsed.ok(), "{parsed:?}");
         assert_eq!(parsed.manifest.unwrap().targets, vec!["cursor"]);
+    }
+
+    #[test]
+    fn scan_workspace_finds_nested_skills() {
+        let root = tempfile::tempdir().unwrap();
+        // A skill nested two levels deep under category folders — this is the
+        // shape that triggered "os error 3" with the old one-level scan.
+        let nested = root
+            .path()
+            .join("skills")
+            .join("dota2-arcade")
+            .join("dota2-arcade-abilities-items");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(
+            nested.join("SKILL.md"),
+            r#"---
+id: dota2-arcade-abilities-items
+type: skill
+name: Dota2 Arcade Abilities Items
+description: Reference for arcade abilities and items.
+version: 0.1.0
+targets:
+  - claude-code
+---
+# Dota2 Arcade
+"#,
+        )
+        .unwrap();
+        // A skill's own subfolders must not be treated as separate skills.
+        let asset_subdir = nested.join("assets");
+        fs::create_dir_all(&asset_subdir).unwrap();
+        fs::write(asset_subdir.join("notes.md"), "not a skill").unwrap();
+        // Noise directories must be skipped.
+        let node_modules = root.path().join("node_modules").join("pkg");
+        fs::create_dir_all(&node_modules).unwrap();
+        fs::write(node_modules.join("SKILL.md"), "should be ignored").unwrap();
+
+        let assets = scan_workspace(root.path()).unwrap();
+        assert_eq!(assets.len(), 1, "{assets:?}");
+        let asset = &assets[0];
+        assert_eq!(asset.manifest.id, "dota2-arcade-abilities-items");
+        assert_eq!(
+            asset.path,
+            PathBuf::from("skills")
+                .join("dota2-arcade")
+                .join("dota2-arcade-abilities-items")
+        );
     }
 
     #[test]

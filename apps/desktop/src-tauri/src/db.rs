@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::fs;
 use sha2::{Sha256, Digest};
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 3;
 
 /// All supported agent/IDE runtimes and their global skill directories.
 pub struct RuntimeInfo {
@@ -104,7 +104,49 @@ impl Database {
                 CREATE INDEX IF NOT EXISTS idx_subscriptions_workspace ON subscriptions(workspace, skill_id);
                 "
             )?;
-            self.conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+            self.conn.execute_batch("PRAGMA user_version = 1;")?;
+        }
+
+        if version < 2 {
+            // Download lifecycle state. A skill row may now exist before its
+            // files are on disk (status='downloading'), so My Skills can show a
+            // live progress bar and survive a restart. Existing rows predate the
+            // async download path and are therefore already on disk → 'installed'.
+            //   install_status: 'downloading' | 'installed' | 'error'
+            //   download_progress: 0..=100 (best-effort; -1 = indeterminate)
+            //   download_error: last failure message when status='error'
+            self.conn.execute_batch(
+                "
+                ALTER TABLE skills ADD COLUMN install_status TEXT NOT NULL DEFAULT 'installed';
+                ALTER TABLE skills ADD COLUMN download_progress INTEGER NOT NULL DEFAULT 100;
+                ALTER TABLE skills ADD COLUMN download_error TEXT NOT NULL DEFAULT '';
+                ",
+            )?;
+            self.conn.execute_batch("PRAGMA user_version = 2;")?;
+        }
+
+        if version < 3 {
+            // Cached AI safety-review result, per skill. Stored alongside the
+            // skill so it's cleaned up on delete (no orphan rows). reviewed_hash
+            // is the content hash at review time: when it no longer matches the
+            // skill's current hash, the cached verdict is shown as "stale" and
+            // the user is nudged to re-review.
+            //   review_verdict: '' | 'safe' | 'caution' | 'danger'
+            //   review_summary: one/two-sentence summary
+            //   review_findings_json: JSON array of {severity, detail}
+            //   reviewed_at: RFC3339 timestamp of the last review ('' = never)
+            //   reviewed_hash: content hash the review was run against
+            self.conn.execute_batch(
+                "
+                ALTER TABLE skills ADD COLUMN review_verdict TEXT NOT NULL DEFAULT '';
+                ALTER TABLE skills ADD COLUMN review_summary TEXT NOT NULL DEFAULT '';
+                ALTER TABLE skills ADD COLUMN review_findings_json TEXT NOT NULL DEFAULT '';
+                ALTER TABLE skills ADD COLUMN reviewed_at TEXT NOT NULL DEFAULT '';
+                ALTER TABLE skills ADD COLUMN reviewed_hash TEXT NOT NULL DEFAULT '';
+                ",
+            )?;
+            self.conn
+                .execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
         }
 
         Ok(())
@@ -137,9 +179,123 @@ impl Database {
         Ok(())
     }
 
+    // -------------------------------------------------------------------------
+    // Download lifecycle (async remote install)
+    // -------------------------------------------------------------------------
+
+    /// Insert (or reset) a skill row in the 'downloading' state *before* its
+    /// files exist on disk, so My Skills can show a live progress bar
+    /// immediately and the intent survives a restart. Real metadata (version,
+    /// hashes) is filled in by [`finish_download`] on success.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_download(
+        &self,
+        id: &str,
+        name: &str,
+        description: &str,
+        version: &str,
+        source_workspace: &str,
+        source_path: &str,
+        source_branch: &str,
+        local_path: &str,
+        link_mode: &str,
+    ) -> rusqlite::Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT OR REPLACE INTO skills
+                (id, name, description, version, source_workspace, source_path, source_branch, local_path, link_mode, baseline_hash, published_hash, mtime_fingerprint, is_modified, installed_at, updated_at, install_status, download_progress, download_error)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, '', '', '', 0, ?10, ?10, 'downloading', 0, '')",
+            params![id, name, description, version, source_workspace, source_path, source_branch, local_path, link_mode, &now],
+        )?;
+        Ok(())
+    }
+
+    /// Update download progress (0..=100, or -1 for an indeterminate stream).
+    /// No-op once the row leaves the 'downloading' state.
+    pub fn set_download_progress(&self, id: &str, progress: i64) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE skills SET download_progress = ?1 WHERE id = ?2 AND install_status = 'downloading'",
+            params![progress, id],
+        )?;
+        Ok(())
+    }
+
+    /// Mark a download as finished: files are on disk, fill in the baseline hash
+    /// and flip to 'installed'.
+    pub fn finish_download(
+        &self,
+        id: &str,
+        version: &str,
+        local_path: &str,
+        baseline_hash: &str,
+    ) -> rusqlite::Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let mtime = collect_mtime_fingerprint(Path::new(local_path));
+        self.conn.execute(
+            "UPDATE skills SET version = ?1, local_path = ?2, baseline_hash = ?3, published_hash = ?3, mtime_fingerprint = ?4, is_modified = 0, install_status = 'installed', download_progress = 100, download_error = '', updated_at = ?5 WHERE id = ?6",
+            params![version, local_path, baseline_hash, &mtime, &now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Mark a download as failed. The row is kept (status='error') so the user
+    /// sees the failure and can retry, instead of the entry vanishing.
+    pub fn fail_download(&self, id: &str, error: &str) -> rusqlite::Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "UPDATE skills SET install_status = 'error', download_error = ?1, updated_at = ?2 WHERE id = ?3",
+            params![error, &now, id],
+        )?;
+        Ok(())
+    }
+
+    /// On startup, flip any lingering 'downloading' rows to 'error'. A tarball
+    /// download can't resume across restarts, so an in-flight download that died
+    /// with the app must surface as interrupted (retryable) rather than a bar
+    /// stuck forever. Returns how many rows were reconciled.
+    pub fn reconcile_interrupted_downloads(&self) -> rusqlite::Result<usize> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let count = self.conn.execute(
+            "UPDATE skills SET install_status = 'error', download_error = 'download interrupted (app was closed)', updated_at = ?1 WHERE install_status = 'downloading'",
+            params![&now],
+        )?;
+        Ok(count)
+    }
+
+    // -------------------------------------------------------------------------
+    // AI safety review cache
+    // -------------------------------------------------------------------------
+
+    /// Persist an AI review result for a skill, stamped with the content hash it
+    /// was run against so we can later detect a stale verdict.
+    pub fn save_review(
+        &self,
+        id: &str,
+        verdict: &str,
+        summary: &str,
+        findings_json: &str,
+        reviewed_hash: &str,
+    ) -> rusqlite::Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "UPDATE skills SET review_verdict = ?1, review_summary = ?2, review_findings_json = ?3, reviewed_at = ?4, reviewed_hash = ?5 WHERE id = ?6",
+            params![verdict, summary, findings_json, &now, reviewed_hash, id],
+        )?;
+        Ok(())
+    }
+
+    /// Clear any cached review for a skill (back to the "never reviewed" state).
+    pub fn clear_review(&self, id: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE skills SET review_verdict = '', review_summary = '', review_findings_json = '', reviewed_at = '', reviewed_hash = '' WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
     pub fn list_skills(&self) -> rusqlite::Result<Vec<SkillRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, description, version, source_workspace, source_path, source_branch, local_path, link_mode, baseline_hash, published_hash, is_modified, installed_at, updated_at FROM skills ORDER BY name"
+            "SELECT id, name, description, version, source_workspace, source_path, source_branch, local_path, link_mode, baseline_hash, published_hash, is_modified, installed_at, updated_at, install_status, download_progress, download_error, review_verdict, review_summary, review_findings_json, reviewed_at, reviewed_hash FROM skills ORDER BY name"
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(SkillRow {
@@ -157,6 +313,14 @@ impl Database {
                 is_modified: row.get::<_, i32>(11)? != 0,
                 installed_at: row.get(12)?,
                 updated_at: row.get(13)?,
+                install_status: row.get(14)?,
+                download_progress: row.get(15)?,
+                download_error: row.get(16)?,
+                review_verdict: row.get(17)?,
+                review_summary: row.get(18)?,
+                review_findings_json: row.get(19)?,
+                reviewed_at: row.get(20)?,
+                reviewed_hash: row.get(21)?,
             })
         })?;
         rows.collect()
@@ -164,7 +328,7 @@ impl Database {
 
     pub fn get_skill(&self, id: &str) -> rusqlite::Result<Option<SkillRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, description, version, source_workspace, source_path, source_branch, local_path, link_mode, baseline_hash, published_hash, is_modified, installed_at, updated_at FROM skills WHERE id = ?1"
+            "SELECT id, name, description, version, source_workspace, source_path, source_branch, local_path, link_mode, baseline_hash, published_hash, is_modified, installed_at, updated_at, install_status, download_progress, download_error, review_verdict, review_summary, review_findings_json, reviewed_at, reviewed_hash FROM skills WHERE id = ?1"
         )?;
         let mut rows = stmt.query_map(params![id], |row| {
             Ok(SkillRow {
@@ -182,6 +346,14 @@ impl Database {
                 is_modified: row.get::<_, i32>(11)? != 0,
                 installed_at: row.get(12)?,
                 updated_at: row.get(13)?,
+                install_status: row.get(14)?,
+                download_progress: row.get(15)?,
+                download_error: row.get(16)?,
+                review_verdict: row.get(17)?,
+                review_summary: row.get(18)?,
+                review_findings_json: row.get(19)?,
+                reviewed_at: row.get(20)?,
+                reviewed_hash: row.get(21)?,
             })
         })?;
         match rows.next() {
@@ -317,6 +489,14 @@ pub struct SkillRow {
     pub is_modified: bool,
     pub installed_at: String,
     pub updated_at: String,
+    pub install_status: String,
+    pub download_progress: i64,
+    pub download_error: String,
+    pub review_verdict: String,
+    pub review_summary: String,
+    pub review_findings_json: String,
+    pub reviewed_at: String,
+    pub reviewed_hash: String,
 }
 
 #[derive(Debug, Clone)]

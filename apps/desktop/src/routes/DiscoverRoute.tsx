@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { Download } from "lucide-react";
-import { Button } from "@heroui/react";
+import { Button, toast } from "@heroui/react";
 import {
   FEATURED_SKILLS,
   parseSource,
@@ -10,16 +10,14 @@ import {
   SKILL_CATEGORIES,
 } from "../lib/registry";
 import {
+  downloadSkillAsync,
   getSkillDetail,
   type SkillManifest,
-  subscribeWorkspaceSkill,
-  syncNow,
 } from "../lib/teamai";
 import { useLocale } from "../hooks/useLocale";
 import { useAppStore } from "../state/appStore";
 import { getSkillDetailFromCache, putSkillDetailInCache } from "../lib/workspaceCache";
 import { formatError } from "../utils/format";
-import { effectiveRisk, riskRequiresConfirmation } from "../utils/risk";
 import { DiscoverPage } from "../pages/DiscoverPage";
 import { SkillSafetyCard } from "../widgets/SkillSafetyCard";
 import { InstallToToolsDialog } from "../widgets/InstallToToolsDialog";
@@ -45,7 +43,6 @@ export function DiscoverRoute() {
   const [selected, setSelected] = useState<RegistrySkill | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [installOpen, setInstallOpen] = useState(false);
-  const [installError, setInstallError] = useState<string | null>(null);
 
   const debouncedQuery = useDebounced(query, 350);
 
@@ -60,7 +57,6 @@ export function DiscoverRoute() {
   // the InstallToToolsDialog stays hidden until the manifest is ready.
   const handleInstallClick = (skill: RegistrySkill) => {
     setSelected(skill);
-    setInstallError(null);
     setInstallOpen(true);
   };
 
@@ -124,31 +120,39 @@ export function DiscoverRoute() {
 
   const manifest: SkillManifest | null = detail.data?.asset.manifest ?? null;
 
-  // Install = subscribe (declare intent + targets) then sync (download+install).
+  // Install = start an async download + install. Returns immediately; progress
+  // shows up in My Skills (downloading bar → installed / retry on error).
+  // Empty targets = download locally, deploy to no tools.
   const install = useMutation({
     mutationFn: async (chosenTargets: string[]) => {
       if (!selected || !manifest) throw new Error("no skill selected");
-      const needsConfirm = riskRequiresConfirmation(effectiveRisk(manifest));
-      await subscribeWorkspaceSkill({
+      // Prefer the backend-resolved in-repo path; fall back to the registry id.
+      const skillPath = detail.data?.asset.path ?? selected.skillId;
+      await downloadSkillAsync({
         workspace: selected.source,
         assetId: manifest.id,
+        skillPath,
         version: manifest.version,
+        name: manifest.name,
+        description: manifest.description,
         targets: chosenTargets,
       });
-      return syncNow(needsConfirm);
     },
-    onSuccess: (report) => {
-      const failed = report.items.find((item) => item.error);
-      if (failed?.error) {
-        setInstallError(failed.error);
-        return;
-      }
-      setInstallError(null);
+    onSuccess: () => {
       setInstallOpen(false);
+      toast.info(t("discover.downloadStarted"));
       queryClient.invalidateQueries({ queryKey: ["db-skills"] });
-      queryClient.invalidateQueries({ queryKey: ["subscriptions"] });
     },
-    onError: (err) => setInstallError(formatError(err)),
+    onError: (err) => {
+      const code = (err as { code?: string })?.code;
+      if (code === "already_downloading") {
+        toast.warning(t("discover.alreadyDownloading"));
+      } else if (code === "already_installed") {
+        toast.warning(t("discover.alreadyInstalled"));
+      } else {
+        toast.danger(formatError(err));
+      }
+    },
   });
 
   const detailPanel = useMemo(() => {
@@ -187,7 +191,6 @@ export function DiscoverRoute() {
             className="h-10"
             isDisabled={!manifest}
             onPress={() => {
-              setInstallError(null);
               setInstallOpen(true);
             }}
           >
@@ -226,7 +229,6 @@ export function DiscoverRoute() {
         onOpenChange={(value) => {
           setInstallOpen(value);
           if (!value) {
-            setInstallError(null);
             // If the drawer isn't showing this skill, drop the selection so a
             // stale detail query doesn't linger.
             if (!drawerOpen) setSelected(null);
@@ -242,12 +244,6 @@ export function DiscoverRoute() {
           install.mutate(chosenTargets);
         }}
       />
-
-      {installError ? (
-        <div className="fixed bottom-4 left-1/2 z-[120] -translate-x-1/2 rounded-md border border-[var(--danger)] bg-[var(--danger-soft)] px-4 py-2 text-[12.5px] text-[var(--danger)] shadow-lg">
-          {installError}
-        </div>
-      ) : null}
     </>
   );
 }

@@ -944,7 +944,46 @@ struct ManagedSkill {
     is_modified: bool,
     installed_at: String,
     updated_at: String,
+    /// 'downloading' | 'installed' | 'error'
+    install_status: String,
+    /// 0..=100, or -1 when the stream length is unknown (indeterminate bar).
+    download_progress: i64,
+    download_error: String,
+    /// '' (never reviewed) | 'safe' | 'caution' | 'danger'
+    review_verdict: String,
+    review_summary: String,
+    review_findings: Vec<ai_review::ReviewFinding>,
+    /// RFC3339 timestamp of the last review, or '' if never reviewed.
+    reviewed_at: String,
+    /// True when a review exists but the skill's content changed since — the
+    /// cached verdict is shown as stale and the user is nudged to re-review.
+    review_stale: bool,
     targets: Vec<ManagedSkillTarget>,
+}
+
+/// Build the review fields of a `ManagedSkill` from a stored row. `current_hash`
+/// is the skill's present content hash, used to flag a stale (outdated) verdict.
+fn review_fields_from_row(
+    row: &db::SkillRow,
+    current_hash: &str,
+) -> (String, String, Vec<ai_review::ReviewFinding>, String, bool) {
+    let findings: Vec<ai_review::ReviewFinding> = if row.review_findings_json.is_empty() {
+        Vec::new()
+    } else {
+        serde_json::from_str(&row.review_findings_json).unwrap_or_default()
+    };
+    // Stale only makes sense once a review exists and we have a hash to compare.
+    let stale = !row.review_verdict.is_empty()
+        && !row.reviewed_hash.is_empty()
+        && !current_hash.is_empty()
+        && row.reviewed_hash != current_hash;
+    (
+        row.review_verdict.clone(),
+        row.review_summary.clone(),
+        findings,
+        row.reviewed_at.clone(),
+        stale,
+    )
 }
 
 #[derive(Debug, Serialize)]
@@ -1013,6 +1052,11 @@ fn db_list_skills(app: tauri::AppHandle) -> CommandResult<Vec<ManagedSkill>> {
                     target_path: t.target_path.clone(),
                 })
                 .collect();
+            // Use baseline_hash (updated on download/sync) as the staleness
+            // anchor: a re-download or remote update changes it, marking any
+            // earlier review stale, without an expensive per-list dir hash.
+            let (review_verdict, review_summary, review_findings, reviewed_at, review_stale) =
+                review_fields_from_row(&s, &s.baseline_hash);
             ManagedSkill {
                 id: s.id,
                 name: s.name,
@@ -1027,6 +1071,14 @@ fn db_list_skills(app: tauri::AppHandle) -> CommandResult<Vec<ManagedSkill>> {
                 is_modified: s.is_modified,
                 installed_at: s.installed_at,
                 updated_at: s.updated_at,
+                install_status: s.install_status,
+                download_progress: s.download_progress,
+                download_error: s.download_error,
+                review_verdict,
+                review_summary,
+                review_findings,
+                reviewed_at,
+                review_stale,
                 targets,
             }
         })
@@ -1175,6 +1227,14 @@ fn db_import_skill(
         is_modified: false,
         installed_at: chrono::Utc::now().to_rfc3339(),
         updated_at: chrono::Utc::now().to_rfc3339(),
+        install_status: "installed".to_owned(),
+        download_progress: 100,
+        download_error: String::new(),
+        review_verdict: String::new(),
+        review_summary: String::new(),
+        review_findings: Vec::new(),
+        reviewed_at: String::new(),
+        review_stale: false,
         targets: targets
             .into_iter()
             .map(|t| ManagedSkillTarget {
@@ -1184,6 +1244,278 @@ fn db_import_skill(
             })
             .collect(),
     })
+}
+
+/// Progress event payload for an in-flight async skill download. Emitted on the
+/// `skill-download-progress` channel so My Skills can show a live bar.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillDownloadProgress {
+    skill_id: String,
+    /// "downloading" | "installed" | "error"
+    status: String,
+    /// 0..=100, or -1 when the stream length is unknown (indeterminate bar).
+    progress: i64,
+    error: Option<String>,
+}
+
+const SKILL_DOWNLOAD_EVENT: &str = "skill-download-progress";
+
+fn emit_download_progress(app: &tauri::AppHandle, payload: SkillDownloadProgress) {
+    let _ = app.emit(SKILL_DOWNLOAD_EVENT, payload);
+}
+
+/// Mark a download as failed in SQLite and notify the UI. Keeping the row (in
+/// the 'error' state) is deliberate: the user sees the failure and can retry,
+/// rather than the entry silently vanishing.
+fn mark_download_failed(app: &tauri::AppHandle, asset_id: &str, error: &str) {
+    if let Some(database) = app.try_state::<Mutex<db::Database>>() {
+        if let Ok(db_guard) = database.lock() {
+            let _ = db_guard.fail_download(asset_id, error);
+        }
+    }
+    emit_download_progress(
+        app,
+        SkillDownloadProgress {
+            skill_id: asset_id.to_owned(),
+            status: "error".to_owned(),
+            progress: 0,
+            error: Some(error.to_owned()),
+        },
+    );
+}
+
+/// Kick off an asynchronous download + install of a remote skill.
+///
+/// Unlike `sync_now` (which blocks until the whole tarball is fetched), this
+/// returns immediately after recording a 'downloading' row in SQLite, then does
+/// the network fetch + extraction + linking on a background task, emitting
+/// `skill-download-progress` events with a real byte-based percentage.
+///
+/// Duplicate protection: if the skill is already 'downloading' or 'installed',
+/// the command errors with a coded reason so the UI can show a notice instead of
+/// starting a redundant download. An 'error' row (a prior failed attempt) is
+/// allowed through so the user can retry.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn download_skill_async(
+    app: tauri::AppHandle,
+    workspace: String,
+    asset_id: String,
+    skill_path: Option<String>,
+    version: Option<String>,
+    name: Option<String>,
+    description: Option<String>,
+    targets: Vec<String>,
+    link_mode: Option<String>,
+) -> CommandResult<()> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let workspace_ref = parse_workspace(&workspace)?;
+
+    let link_mode = link_mode.unwrap_or_else(|| "symlink".to_owned());
+    let dest = paths.home.join("skills").join(&asset_id);
+    let display_name = name.unwrap_or_else(|| asset_id.clone());
+    let description = description.unwrap_or_default();
+    let version = version
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_default();
+
+    // Duplicate protection + record the 'downloading' row up front.
+    {
+        let database = app.state::<Mutex<db::Database>>();
+        let db_guard = database.lock().unwrap();
+        if let Some(existing) = db_guard
+            .get_skill(&asset_id)
+            .map_err(|e| CommandError::coded("db_error", e.to_string()))?
+        {
+            match existing.install_status.as_str() {
+                "downloading" => {
+                    return Err(CommandError::coded(
+                        "already_downloading",
+                        format!("'{asset_id}' is already downloading"),
+                    ))
+                }
+                "installed" => {
+                    return Err(CommandError::coded(
+                        "already_installed",
+                        format!("'{asset_id}' is already installed"),
+                    ))
+                }
+                // "error" (a prior failed attempt) → allow retry.
+                _ => {}
+            }
+        }
+        db_guard
+            .begin_download(
+                &asset_id,
+                &display_name,
+                &description,
+                &version,
+                &workspace,
+                skill_path.as_deref().unwrap_or(""),
+                "",
+                &dest.to_string_lossy(),
+                &link_mode,
+            )
+            .map_err(|e| CommandError::coded("db_error", e.to_string()))?;
+    }
+
+    emit_download_progress(
+        &app,
+        SkillDownloadProgress {
+            skill_id: asset_id.clone(),
+            status: "downloading".to_owned(),
+            progress: 0,
+            error: None,
+        },
+    );
+
+    let token = saved_github_token(&paths);
+    tauri::async_runtime::spawn(run_skill_download(
+        app,
+        paths,
+        workspace_ref,
+        asset_id,
+        skill_path,
+        version,
+        targets,
+        link_mode,
+        dest,
+        token,
+    ));
+
+    Ok(())
+}
+
+/// Background worker for [`download_skill_async`]: fetch the tarball with
+/// progress, copy the located skill into the data dir, link it into the chosen
+/// tool folders, and reconcile the SQLite row to 'installed' (or 'error').
+#[allow(clippy::too_many_arguments)]
+async fn run_skill_download(
+    app: tauri::AppHandle,
+    paths: AppPaths,
+    workspace: WorkspaceRef,
+    asset_id: String,
+    skill_path: Option<String>,
+    version: String,
+    targets: Vec<String>,
+    link_mode: String,
+    dest: PathBuf,
+    token: Option<String>,
+) {
+    // Throttle progress writes/emits to once per whole-percent change.
+    let progress_app = app.clone();
+    let progress_id = asset_id.clone();
+    let mut last_percent: i64 = -2;
+    let on_progress = move |downloaded: u64, total: Option<u64>| {
+        let percent = match total {
+            Some(total) if total > 0 => ((downloaded.saturating_mul(100)) / total) as i64,
+            _ => -1,
+        };
+        if percent == last_percent {
+            return;
+        }
+        last_percent = percent;
+        if let Some(database) = progress_app.try_state::<Mutex<db::Database>>() {
+            if let Ok(db_guard) = database.lock() {
+                let _ = db_guard.set_download_progress(&progress_id, percent);
+            }
+        }
+        emit_download_progress(
+            &progress_app,
+            SkillDownloadProgress {
+                skill_id: progress_id.clone(),
+                status: "downloading".to_owned(),
+                progress: percent,
+                error: None,
+            },
+        );
+    };
+
+    let prepared = match teamai_sync::download_skill_for_install(
+        &paths,
+        &workspace,
+        &asset_id,
+        skill_path.as_deref(),
+        &version,
+        token.as_deref(),
+        on_progress,
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(err) => {
+            mark_download_failed(&app, &asset_id, &err.to_string());
+            return;
+        }
+    };
+
+    // Copy the located skill into our managed data dir (fresh each time so a
+    // retry overwrites any partial leftovers).
+    if dest.exists() {
+        let _ = fs::remove_dir_all(&dest);
+    }
+    if let Err(err) = db::copy_dir_recursive(&prepared.source_dir, &dest) {
+        mark_download_failed(&app, &asset_id, &err.to_string());
+        return;
+    }
+    let baseline_hash = db::compute_dir_hash(&dest);
+
+    {
+        let database = app.state::<Mutex<db::Database>>();
+        let lock = database.lock();
+        if let Ok(db_guard) = lock {
+            if let Err(err) = db_guard.finish_download(
+                &asset_id,
+                &prepared.manifest.version,
+                &dest.to_string_lossy(),
+                &baseline_hash,
+            ) {
+                drop(db_guard);
+                mark_download_failed(&app, &asset_id, &err.to_string());
+                return;
+            }
+        }
+    }
+
+    // Link into each chosen tool folder (empty targets = download-only).
+    if let Some(home) = dirs::home_dir() {
+        for runtime in &targets {
+            let Some(target_dir) = db::resolve_runtime_global_path(&home, runtime) else {
+                continue;
+            };
+            let target_path = target_dir.join(&asset_id);
+            match db::link_skill(&dest, &target_path, &link_mode) {
+                Ok(()) => {
+                    let database = app.state::<Mutex<db::Database>>();
+                    let lock = database.lock();
+                    if let Ok(db_guard) = lock {
+                        let _ = db_guard.set_target_enabled(
+                            &asset_id,
+                            runtime,
+                            true,
+                            &target_path.to_string_lossy(),
+                        );
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(skill = %asset_id, runtime = %runtime, error = %err, "failed to link skill into tool folder");
+                }
+            }
+        }
+    }
+
+    emit_download_progress(
+        &app,
+        SkillDownloadProgress {
+            skill_id: asset_id,
+            status: "installed".to_owned(),
+            progress: 100,
+            error: None,
+        },
+    );
 }
 
 /// Open the Team AI Hub data directory in the system file manager.
@@ -3563,6 +3895,119 @@ async fn review_skill(request: ai_review::ReviewRequest) -> CommandResult<ai_rev
         })
 }
 
+/// Review an already-installed ("My Skills") skill straight from its local copy
+/// on disk — no GitHub download. The AI provider config comes from the caller
+/// (the same Settings the discover-page review uses); the API key is read from
+/// the keychain. The verdict + findings are cached back into SQLite, stamped
+/// with the skill's current content hash so a later content change marks it
+/// stale.
+#[tauri::command]
+async fn review_local_skill(
+    app: tauri::AppHandle,
+    skill_id: String,
+    provider: String,
+    base_url: String,
+    model: String,
+) -> CommandResult<ai_review::ReviewResult> {
+    if provider.trim().is_empty() || provider == "none" {
+        return Err(CommandError::coded(
+            "ai_not_configured",
+            "configure an AI provider in Settings first",
+        ));
+    }
+    if base_url.trim().is_empty() {
+        return Err(CommandError::coded(
+            "ai_not_configured",
+            "set the provider base URL in Settings",
+        ));
+    }
+    let key = teamai_core::read_ai_key()
+        .map_err(|err| CommandError::coded("ai_key_read", err.to_string()))?
+        .filter(|k| !k.trim().is_empty())
+        .ok_or_else(|| CommandError::coded("ai_missing_key", "add an AI API key in Settings"))?;
+
+    // Look up the skill's on-disk location (lock released before the await).
+    let skill = {
+        let database = app.state::<Mutex<db::Database>>();
+        let db_guard = database.lock().unwrap();
+        db_guard
+            .get_skill(&skill_id)
+            .map_err(|e| CommandError::coded("db_error", e.to_string()))?
+            .ok_or_else(|| {
+                CommandError::coded("skill_not_found", format!("skill '{skill_id}' not in registry"))
+            })?
+    };
+
+    let local_path = PathBuf::from(&skill.local_path);
+    if !local_path.is_dir() {
+        return Err(CommandError::coded(
+            "skill_files_missing",
+            format!("skill files not found at {}", skill.local_path),
+        ));
+    }
+
+    // Pull declared permissions from the manifest for extra prompt context.
+    let permissions = teamai_manifest::parse_skill_dir(&local_path)
+        .ok()
+        .and_then(|p| p.manifest)
+        .map(|m| m.permissions)
+        .unwrap_or_default();
+
+    let request = ai_review::ReviewRequest {
+        provider,
+        base_url,
+        model,
+        // workspace/skill_path/ref_name are only used by the download path; the
+        // local reviewer walks `local_path` directly, so they stay empty.
+        workspace: String::new(),
+        skill_path: String::new(),
+        ref_name: None,
+        skill_name: if skill.name.is_empty() { skill_id.clone() } else { skill.name.clone() },
+        permissions,
+    };
+
+    let result = ai_review::review_skill(&request, &local_path, &key)
+        .await
+        .map_err(map_review_error)?;
+
+    // Cache the verdict, stamped with the current content hash for staleness.
+    let current_hash = db::compute_dir_hash(&local_path);
+    let findings_json = serde_json::to_string(&result.findings).unwrap_or_default();
+    {
+        let database = app.state::<Mutex<db::Database>>();
+        let db_guard = database.lock().unwrap();
+        db_guard
+            .save_review(
+                &skill_id,
+                &result.verdict,
+                &result.summary,
+                &findings_json,
+                &current_hash,
+            )
+            .map_err(|e| CommandError::coded("db_error", e.to_string()))?;
+    }
+
+    Ok(result)
+}
+
+/// Shared mapping of an `ai_review::ReviewError` to a coded command error.
+fn map_review_error(err: ai_review::ReviewError) -> CommandError {
+    match err {
+        ai_review::ReviewError::NotConfigured | ai_review::ReviewError::MissingKey => {
+            CommandError::coded("ai_not_configured", err.to_string())
+        }
+        ai_review::ReviewError::UnsupportedProvider(_) => {
+            CommandError::coded("ai_unsupported_provider", err.to_string())
+        }
+        ai_review::ReviewError::Io(_) => CommandError::coded("ai_download", err.to_string()),
+        ai_review::ReviewError::Network(_) => CommandError::coded("ai_network", err.to_string()),
+        ai_review::ReviewError::Provider { .. } => {
+            CommandError::coded("ai_provider_error", err.to_string())
+        }
+        ai_review::ReviewError::Parse(_) => CommandError::coded("ai_parse", err.to_string()),
+    }
+}
+
 fn github_provider(token: Option<&str>) -> CommandResult<GitHubProvider> {
     match token {
         Some(token) if !token.trim().is_empty() => {
@@ -3767,6 +4212,15 @@ pub fn run() {
     let paths = AppPaths::resolve().expect("failed to resolve app paths");
     let db_path = paths.home.join("db.sqlite");
     let database = db::Database::open(&db_path).expect("failed to open database");
+    // A tarball download can't resume across restarts, so any row left in the
+    // 'downloading' state from a previous session (the app was closed mid-fetch)
+    // is reconciled to 'error' here — surfacing it as interrupted + retryable
+    // rather than a progress bar stuck forever.
+    if let Ok(count) = database.reconcile_interrupted_downloads() {
+        if count > 0 {
+            tracing::info!(count, "reconciled interrupted downloads from previous session");
+        }
+    }
 
     tauri::Builder::default()
         .manage(DeepLinkState::default())
@@ -3880,6 +4334,8 @@ pub fn run() {
             remote_cache_stats,
             db_check_modifications,
             db_unmanage_skill,
+            download_skill_async,
+            review_local_skill,
             open_data_dir
         ])
         .run(tauri::generate_context!())

@@ -43,7 +43,9 @@ export function SubscribeModal({
 
   useEffect(() => {
     if (open) {
-      setSelected(initialTargets.length ? initialTargets : ["claude-code"]);
+      // Tools default to OFF; selecting none is allowed (downloads without
+      // deploying to any tool).
+      setSelected(initialTargets);
       setPolicy("auto-patch");
     }
   }, [open, initialTargets]);
@@ -153,7 +155,6 @@ export function SubscribeModal({
               <Button
                 onPress={() => onConfirm({ targets: selected, policy, channel: "stable" })}
                 isPending={pending}
-                isDisabled={!selected.length}
               >
                 {t("subscribe.confirm")}
               </Button>

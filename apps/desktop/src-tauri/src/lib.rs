@@ -1,3 +1,4 @@
+mod ai_review;
 mod db;
 
 use serde::Serialize;
@@ -23,8 +24,8 @@ use teamai_provider_github::{
 };
 use teamai_publish::{PublishPackage, PublishPolicyResult, PublishRequestSummary};
 use teamai_sync::{
-    RemoteWorkspaceSkills, StoredWorkspace, Subscription, SubscriptionsFile, TargetSelection,
-    WorkspaceWebhookRegistration, WorkspacesFile,
+    RemoteWorkspaceSkills, StoredWorkspace, Subscription, SubscriptionsFile, SyncOptions,
+    SyncReport, TargetSelection, WorkspaceWebhookRegistration, WorkspacesFile,
 };
 use url::Url;
 
@@ -119,7 +120,12 @@ impl From<teamai_installer::InstallerError> for CommandError {
 
 impl From<teamai_sync::SyncError> for CommandError {
     fn from(value: teamai_sync::SyncError) -> Self {
-        Self::coded("sync_error", value.to_string())
+        let code = match value {
+            teamai_sync::SyncError::NotFound(_) => "subscription_not_found",
+            teamai_sync::SyncError::RemoteNotFound(_) => "remote_not_found",
+            _ => "sync_error",
+        };
+        Self::coded(code, value.to_string())
     }
 }
 
@@ -497,6 +503,32 @@ async fn scan_github_workspace(
 }
 
 #[tauri::command]
+async fn scan_github_workspace_streaming(
+    app: tauri::AppHandle,
+    workspace: String,
+    token: Option<String>,
+) -> CommandResult<WorkspaceSkillsResponse> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let workspace = parse_workspace(&workspace)?;
+    let token = token.or_else(|| saved_github_token(&paths));
+    let app_handle = app.clone();
+    let remote: RemoteWorkspaceSkills =
+        teamai_sync::scan_github_workspace_skills_streaming(
+            &workspace,
+            token.as_deref(),
+            |batch| {
+                let _ = app_handle.emit("workspace-scan-progress", batch);
+            },
+        )
+        .await?;
+    Ok(WorkspaceSkillsResponse {
+        workspace: remote.workspace,
+        skills: remote.skills,
+    })
+}
+
+#[tauri::command]
 async fn get_workspace_detail(
     workspace: String,
     token: Option<String>,
@@ -526,6 +558,111 @@ async fn get_skill_detail(
         token.as_deref(),
     )
     .await?)
+}
+
+// ---------------------------------------------------------------------------
+// Public skill registry (skills.sh) — consumer-layer discovery.
+//
+// Anonymous, no GitHub token required. The desktop webview cannot fetch
+// skills.sh directly (no CORS headers), so this command proxies the request
+// server-side and caches results briefly to avoid hammering the registry.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RegistrySkill {
+    /// Composite id: "owner/repo/skillId"
+    id: String,
+    skill_id: String,
+    name: String,
+    #[serde(default)]
+    installs: u64,
+    /// GitHub "owner/repo" — feeds the anonymous read path (get_skill_detail).
+    source: String,
+    #[serde(default)]
+    is_official: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct RegistrySearchResponse {
+    #[serde(default)]
+    skills: Vec<RegistrySkill>,
+}
+
+struct RegistryCacheEntry {
+    fetched_at: SystemTime,
+    skills: Vec<RegistrySkill>,
+}
+
+#[derive(Default)]
+struct RegistryCache {
+    entries: Mutex<HashMap<String, RegistryCacheEntry>>,
+}
+
+const REGISTRY_CACHE_TTL_SECS: u64 = 600; // 10 minutes
+const REGISTRY_SEARCH_URL: &str = "https://skills.sh/api/search";
+
+#[tauri::command]
+async fn search_skills_registry(
+    cache: tauri::State<'_, RegistryCache>,
+    query: String,
+) -> CommandResult<Vec<RegistrySkill>> {
+    let needle = query.trim().to_string();
+    if needle.len() < 2 {
+        return Ok(Vec::new());
+    }
+    let cache_key = needle.to_lowercase();
+
+    // Serve from cache when fresh.
+    if let Ok(entries) = cache.entries.lock() {
+        if let Some(entry) = entries.get(&cache_key) {
+            if entry
+                .fetched_at
+                .elapsed()
+                .map(|age| age.as_secs() < REGISTRY_CACHE_TTL_SECS)
+                .unwrap_or(false)
+            {
+                return Ok(entry.skills.clone());
+            }
+        }
+    }
+
+    let client = reqwest::Client::builder()
+        .user_agent("team-ai-hub/0.1")
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|err| CommandError::coded("registry_client", err.to_string()))?;
+
+    let response = client
+        .get(REGISTRY_SEARCH_URL)
+        .query(&[("q", needle.as_str())])
+        .send()
+        .await
+        .map_err(|err| CommandError::coded("registry_request", err.to_string()))?;
+
+    if !response.status().is_success() {
+        return Err(CommandError::coded(
+            "registry_status",
+            format!("skill registry returned HTTP {}", response.status()),
+        ));
+    }
+
+    let parsed: RegistrySearchResponse = response
+        .json()
+        .await
+        .map_err(|err| CommandError::coded("registry_parse", err.to_string()))?;
+
+    if let Ok(mut entries) = cache.entries.lock() {
+        entries.insert(
+            cache_key,
+            RegistryCacheEntry {
+                fetched_at: SystemTime::now(),
+                skills: parsed.skills.clone(),
+            },
+        );
+    }
+
+    Ok(parsed.skills)
 }
 
 #[tauri::command]
@@ -721,6 +858,29 @@ fn subscribe_workspace_skill(
         subscribed_at: None,
     };
     Ok(teamai_sync::subscribe(&paths.subscriptions, subscription)?)
+}
+
+/// Download + install all subscribed skills (GitHub archive → extract → install
+/// → pin lockfile). This is the real remote-install path that `install_skill`
+/// (local dirs only) cannot perform. Used by consumer one-click install (after
+/// subscribe) and by "auto update". `allow_risky` must be true to install
+/// medium-or-higher risk skills without erroring.
+#[tauri::command]
+async fn sync_now(allow_risky: Option<bool>) -> CommandResult<SyncReport> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let token = saved_github_token(&paths);
+    let report = teamai_sync::sync_subscriptions(
+        &paths,
+        SyncOptions {
+            token,
+            target_roots: Vec::new(),
+            source_override: None,
+            allow_risky: allow_risky.unwrap_or(false),
+        },
+    )
+    .await?;
+    Ok(report)
 }
 
 #[tauri::command]
@@ -3261,9 +3421,8 @@ async fn accept_repository_invitation(invitation_id: u64) -> CommandResult<()> {
 }
 
 fn selection_from_targets(targets: Vec<String>) -> TargetSelection {
-    if targets.is_empty() {
-        return TargetSelection::all_default();
-    }
+    // No "empty → all tools" fallback: an empty list is a deliberate
+    // "download locally, deploy nowhere" choice (all switches off in the UI).
     TargetSelection {
         claude_code: targets.iter().any(|target| target == "claude-code"),
         cursor: targets.iter().any(|target| target == "cursor"),
@@ -3318,6 +3477,90 @@ fn saved_github_token(paths: &AppPaths) -> Option<String> {
         .ok()
         .flatten()
         .map(|github| github.token)
+}
+
+// ---------------------------------------------------------------------------
+// AI review — provider API key stored in the OS keychain, and a command that
+// sends a skill's SKILL.md to the configured LLM for a safety review.
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn save_ai_key(key: String) -> CommandResult<()> {
+    teamai_core::write_ai_key(&key)
+        .map_err(|err| CommandError::coded("ai_key_save", err.to_string()))
+}
+
+#[tauri::command]
+fn delete_ai_key() -> CommandResult<()> {
+    teamai_core::delete_ai_key()
+        .map_err(|err| CommandError::coded("ai_key_delete", err.to_string()))
+}
+
+/// Returns whether an AI API key is currently stored (never returns the key).
+#[tauri::command]
+fn has_ai_key() -> CommandResult<bool> {
+    Ok(teamai_core::read_ai_key()
+        .map_err(|err| CommandError::coded("ai_key_read", err.to_string()))?
+        .map(|k| !k.trim().is_empty())
+        .unwrap_or(false))
+}
+
+#[tauri::command]
+async fn review_skill(request: ai_review::ReviewRequest) -> CommandResult<ai_review::ReviewResult> {
+    if request.provider.trim().is_empty() || request.provider == "none" {
+        return Err(CommandError::coded(
+            "ai_not_configured",
+            "configure an AI provider in Settings first",
+        ));
+    }
+    if request.base_url.trim().is_empty() {
+        return Err(CommandError::coded(
+            "ai_not_configured",
+            "set the provider base URL in Settings",
+        ));
+    }
+    let key = teamai_core::read_ai_key()
+        .map_err(|err| CommandError::coded("ai_key_read", err.to_string()))?
+        .filter(|k| !k.trim().is_empty())
+        .ok_or_else(|| CommandError::coded("ai_missing_key", "add an AI API key in Settings"))?;
+
+    // Download (or reuse a cached copy of) the entire skill source so the whole
+    // bundle is reviewed, not just SKILL.md. Token is optional (public skills
+    // can be reviewed anonymously).
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let workspace = parse_workspace(&request.workspace)?;
+    let token = saved_github_token(&paths);
+    let prepared = teamai_sync::prepare_skill_for_review(
+        &paths,
+        &workspace,
+        &request.skill_path,
+        request.ref_name.as_deref(),
+        token.as_deref(),
+    )
+    .await
+    .map_err(|err| CommandError::coded("ai_download", err.to_string()))?;
+
+    ai_review::review_skill(&request, &prepared.skill_dir, &key)
+        .await
+        .map_err(|err| match err {
+            ai_review::ReviewError::NotConfigured | ai_review::ReviewError::MissingKey => {
+                CommandError::coded("ai_not_configured", err.to_string())
+            }
+            ai_review::ReviewError::UnsupportedProvider(_) => {
+                CommandError::coded("ai_unsupported_provider", err.to_string())
+            }
+            ai_review::ReviewError::Io(_) => {
+                CommandError::coded("ai_download", err.to_string())
+            }
+            ai_review::ReviewError::Network(_) => {
+                CommandError::coded("ai_network", err.to_string())
+            }
+            ai_review::ReviewError::Provider { .. } => {
+                CommandError::coded("ai_provider_error", err.to_string())
+            }
+            ai_review::ReviewError::Parse(_) => CommandError::coded("ai_parse", err.to_string()),
+        })
 }
 
 fn github_provider(token: Option<&str>) -> CommandResult<GitHubProvider> {
@@ -3514,6 +3757,10 @@ fn humanize_agent_dir_name(value: &str) -> String {
 }
 
 pub fn run() {
+    // Load .env file(s) so GITHUB_CLIENT_ID and other vars are available at runtime.
+    // Silently ignore if no .env exists (e.g. production builds with baked-in values).
+    let _ = dotenvy::dotenv();
+
     init_tracing();
 
     // Initialize SQLite database
@@ -3523,6 +3770,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(DeepLinkState::default())
+        .manage(RegistryCache::default())
         .manage(Mutex::new(database))
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
@@ -3578,12 +3826,19 @@ pub fn run() {
             export_diagnostics,
             open_logs_folder,
             list_github_workspaces,
+            search_skills_registry,
+            save_ai_key,
+            delete_ai_key,
+            has_ai_key,
+            review_skill,
             list_workspaces,
             scan_workspace,
             scan_github_workspace,
+            scan_github_workspace_streaming,
             parse_skill,
             read_subscriptions,
             subscribe_workspace_skill,
+            sync_now,
             install_skill,
             remove_skill,
             list_installed_targets,
@@ -3678,15 +3933,14 @@ mod tests {
     #[test]
     fn local_agent_roots_include_ide_agents_and_shared_skills() {
         let roots = local_agent_root_specs(Path::new("/home/demo"));
-        let paths = roots
-            .iter()
-            .map(|root| root.path.to_string_lossy().to_string())
-            .collect::<Vec<_>>();
+        let paths = roots.iter().map(|root| root.path.clone()).collect::<Vec<_>>();
 
-        assert!(paths.iter().any(|path| path.ends_with("/.cursor/agents")));
-        assert!(paths.iter().any(|path| path.ends_with("/.claude/agents")));
-        assert!(paths.iter().any(|path| path.ends_with("/.agents/skills")));
-        assert!(paths.iter().any(|path| path.ends_with("/.codex/skills")));
+        // Use Path::ends_with (component-wise match) so this passes regardless
+        // of the platform's path separator (e.g. backslashes on Windows).
+        assert!(paths.iter().any(|path| path.ends_with(".cursor/agents")));
+        assert!(paths.iter().any(|path| path.ends_with(".claude/agents")));
+        assert!(paths.iter().any(|path| path.ends_with(".agents/skills")));
+        assert!(paths.iter().any(|path| path.ends_with(".codex/skills")));
     }
 
     #[test]

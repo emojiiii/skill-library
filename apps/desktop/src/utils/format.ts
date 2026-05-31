@@ -43,6 +43,14 @@ export function shortHash(value?: string | null): string {
   return value.startsWith("sha256:") ? `${value.slice(0, 19)}...` : value.slice(0, 16);
 }
 
+/** Compact install count: 1234 -> "1.2k", 1759035 -> "1.8m". */
+export function formatInstalls(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0";
+  if (value < 1000) return String(value);
+  if (value < 1_000_000) return `${(value / 1000).toFixed(value < 10_000 ? 1 : 0)}k`;
+  return `${(value / 1_000_000).toFixed(1)}m`;
+}
+
 export function formatDateTime(value?: string | null): string {
   if (!value) return "unknown";
   return new Intl.DateTimeFormat(undefined, {

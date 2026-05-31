@@ -8,7 +8,7 @@ function getSnapshot(): AppSettings {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) return JSON.parse(raw);
   } catch { /* ignore */ }
-  return { theme: "system", accentColor: "blue", language: "auto", proxyMode: "none", proxyUrl: "", requestTimeout: 30 };
+  return { theme: "system", accentColor: "blue", language: "auto", proxyMode: "none", proxyUrl: "", requestTimeout: 30, aiProvider: "none", aiBaseUrl: "", aiModel: "" };
 }
 
 let cachedSettings = getSnapshot();

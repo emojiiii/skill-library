@@ -1,3 +1,5 @@
+import { Card } from "./Card";
+
 export type MetricTone = "success" | "warning" | "danger" | "default";
 
 const toneAccent: Record<MetricTone, string> = {
@@ -19,7 +21,7 @@ export function MetricTile({
   hint?: string;
 }) {
   return (
-    <div className="card p-4">
+    <Card className="p-4">
       <div className="text-[10.5px] font-semibold uppercase tracking-wider text-[var(--fg-muted)]">{label}</div>
       <div
         className="mt-2 text-[26px] font-semibold leading-none tracking-tight tabular-nums"
@@ -28,6 +30,6 @@ export function MetricTile({
         {value}
       </div>
       {hint ? <div className="mt-2 text-[11.5px] text-[var(--fg-muted)]">{hint}</div> : null}
-    </div>
+    </Card>
   );
 }

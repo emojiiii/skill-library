@@ -237,13 +237,13 @@ pub fn evaluate_publish_policy_with_options(
     let script_files = files
         .iter()
         .filter(|file| is_script_file(&file.relative_path))
-        .map(|file| file.relative_path.to_string_lossy().to_string())
+        .map(|file| rel_path_display(&file.relative_path))
         .collect::<Vec<_>>();
     let large_files = files
         .iter()
         .filter(|file| file.bytes.len() as u64 > options.large_file_threshold_bytes)
         .map(|file| PublishPolicyFile {
-            path: file.relative_path.to_string_lossy().to_string(),
+            path: rel_path_display(&file.relative_path),
             bytes: file.bytes.len() as u64,
         })
         .collect::<Vec<_>>();
@@ -284,6 +284,19 @@ pub fn evaluate_publish_policy_with_options(
         script_files,
         large_files,
     })
+}
+
+fn rel_path_display(relative_path: &Path) -> String {
+    // Forward-slash join the path components so report/display paths are
+    // consistent across platforms (Windows would otherwise show backslashes).
+    relative_path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn repo_skill_path(skill_id: &str, relative_path: &Path) -> Result<String> {

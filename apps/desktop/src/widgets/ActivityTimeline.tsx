@@ -2,6 +2,7 @@ import { GitCommit, Tag } from "lucide-react";
 import type { SkillAsset, SkillVersion } from "../lib/teamai";
 import { useLocale } from "../hooks/useLocale";
 import { formatRelativeTime } from "../utils/format";
+import { Card } from "./Card";
 import { Pill } from "./Pill";
 
 export function ActivityTimeline({
@@ -34,17 +35,17 @@ export function ActivityTimeline({
   return (
     <div className="space-y-6">
       {assets.map((asset) => (
-        <section key={asset.manifest.id} className="card overflow-hidden">
-          <div className="card-header">
+        <Card key={asset.manifest.id} className="overflow-hidden p-0 gap-0">
+          <Card.Header>
             <div>
               <div className="flex items-center gap-2">
-                <span className="card-title">{asset.manifest.name}</span>
+                <span className="text-[13px] font-semibold text-[var(--fg)]">{asset.manifest.name}</span>
                 <Pill mono>v{asset.manifest.version}</Pill>
               </div>
-              <div className="card-subtitle font-mono">{asset.path}</div>
+              <Card.Subtitle className="font-mono">{asset.path}</Card.Subtitle>
             </div>
             <Pill>{versions.length} refs</Pill>
-          </div>
+          </Card.Header>
           <div className="px-4 py-3">
             {versions.map((version) => (
               <button
@@ -68,7 +69,7 @@ export function ActivityTimeline({
               </button>
             ))}
           </div>
-        </section>
+        </Card>
       ))}
     </div>
   );

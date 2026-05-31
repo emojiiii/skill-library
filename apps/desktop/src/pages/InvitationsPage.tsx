@@ -12,6 +12,7 @@ import type {
 import { acceptRepositoryInvitation, inviteGithubCollaborator, listRepositoryInvitations } from "../lib/teamai";
 import { type InviteRole, inviteRoleLabel, inviteRoles } from "../utils/navigation";
 import { formatRelativeTime, openExternalUrl } from "../utils/format";
+import { Card } from "../widgets/Card";
 import { ManagementTable } from "../widgets/ManagementTable";
 import { MetricTile } from "../widgets/MetricTile";
 import { Pill } from "../widgets/Pill";
@@ -111,11 +112,11 @@ export function InvitationsPage({
         </ManagementTable>
 
         <div className="grid gap-5 xl:grid-cols-[400px_minmax(0,1fr)]">
-          <div className="card p-4">
+          <Card className="p-4">
             <div className="mb-3 flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <div className="card-title">{t("invitations.inviteCollaborator")}</div>
-                <div className="card-subtitle truncate">{workspaceRef || t("invitations.pickWorkspaceFirst")}</div>
+                <Card.Title>{t("invitations.inviteCollaborator")}</Card.Title>
+                <Card.Subtitle className="truncate">{workspaceRef || t("invitations.pickWorkspaceFirst")}</Card.Subtitle>
               </div>
             </div>
 
@@ -159,11 +160,11 @@ export function InvitationsPage({
             </div>
 
             {inviteCollaborator.data ? (
-              <div className="mt-3 rounded-md border border-[var(--accent)] bg-[var(--accent-soft)] px-3 py-2 text-xs text-[var(--accent-fg)]">
+              <div className="mt-3 rounded-md border border-[var(--accent)] bg-[var(--accent-soft)] px-3 py-2 text-xs text-[var(--accent-soft-foreground)]">
                 {t("invitations.invited")} {inviteCollaborator.data.login_or_email} · {inviteCollaborator.data.state}
               </div>
             ) : null}
-          </div>
+          </Card>
 
           <ManagementTable
             title={t("invitations.workspaceMembers")}

@@ -2,6 +2,7 @@ import { Button } from "@heroui/react";
 import { PackageOpen, Terminal } from "lucide-react";
 import { useLocale } from "../hooks/useLocale";
 import type { DiagnosticsExport } from "../lib/teamai";
+import { Card } from "../widgets/Card";
 import { MetricTile } from "../widgets/MetricTile";
 import { Pill } from "../widgets/Pill";
 
@@ -26,11 +27,11 @@ export function CliPage({
   return (
     <section className="scroll-area min-h-0 flex-1 px-6 py-6">
       <div className="mx-auto flex max-w-4xl flex-col gap-5">
-        <div className="card p-5">
+        <Card className="p-5">
           <div className="mb-3 flex items-start justify-between gap-3">
             <div>
-              <div className="card-title">{t("cli.rustCli")}</div>
-              <div className="card-subtitle">{t("cli.rustCliDesc")}</div>
+              <Card.Title>{t("cli.rustCli")}</Card.Title>
+              <Card.Subtitle>{t("cli.rustCliDesc")}</Card.Subtitle>
             </div>
             <Pill tone="success">native</Pill>
           </div>
@@ -38,15 +39,15 @@ export function CliPage({
           <p className="mt-3 text-[12px] text-[var(--muted)]">
             {t("cli.cliHint")}
           </p>
-        </div>
+        </Card>
 
-        <div className="card p-5">
+        <Card className="p-5">
           <div className="mb-4 grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
             <div className="min-w-0">
-              <div className="card-title">{t("cli.diagnostics")}</div>
-              <div className="card-subtitle truncate">
+              <Card.Title>{t("cli.diagnostics")}</Card.Title>
+              <Card.Subtitle className="truncate">
                 {diagnostics?.outputDir ?? "~/.team-ai-hub/tmp/diagnostics"}
-              </div>
+              </Card.Subtitle>
             </div>
             <div className="flex flex-wrap justify-end gap-2">
               <Button variant="secondary" onPress={onExportDiagnostics} isPending={diagnosticsPending}>
@@ -98,7 +99,7 @@ export function CliPage({
               ))}
             </div>
           ) : null}
-        </div>
+        </Card>
       </div>
     </section>
   );

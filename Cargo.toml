@@ -24,6 +24,7 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "5"
+dotenvy = "0.15"
 flate2 = "1"
 frontmatter-gen = "0.1"
 futures = "0.3"

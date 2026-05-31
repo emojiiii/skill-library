@@ -14,6 +14,7 @@ import type { ReactNode } from "react";
 import { useLocale } from "../hooks/useLocale";
 import { listWorkspaceEvents, type WorkspaceEvent } from "../lib/teamai";
 import { formatRelativeTime, openExternalUrl } from "../utils/format";
+import { Card } from "../widgets/Card";
 import { MetricTile } from "../widgets/MetricTile";
 
 const eventIcon: Record<string, ReactNode> = {
@@ -58,11 +59,11 @@ export function ActivityPage({ workspaceRef }: { workspaceRef: string }) {
           <MetricTile label={t("activity.releases")} value={releaseCount} tone={releaseCount ? "success" : "default"} />
         </div>
 
-        <div className="card overflow-hidden">
-          <div className="card-header">
+        <Card className="overflow-hidden p-0 gap-0">
+          <Card.Header>
             <div>
-              <div className="card-title">{t("activity.recentActivity")}</div>
-              <div className="card-subtitle truncate font-mono">{workspaceRef}</div>
+              <Card.Title>{t("activity.recentActivity")}</Card.Title>
+              <Card.Subtitle className="truncate font-mono">{workspaceRef}</Card.Subtitle>
             </div>
             <Button
               isIconOnly
@@ -73,7 +74,7 @@ export function ActivityPage({ workspaceRef }: { workspaceRef: string }) {
             >
               <RefreshCw size={13} />
             </Button>
-          </div>
+          </Card.Header>
 
           {query.error ? (
             <div className="border-b border-[var(--line)] bg-[var(--danger-soft)] px-4 py-2 text-[12px] text-[var(--danger)]">
@@ -99,7 +100,7 @@ export function ActivityPage({ workspaceRef }: { workspaceRef: string }) {
               <div>{t("activity.noActivityDesc")}</div>
             </div>
           )}
-        </div>
+        </Card>
       </div>
     </section>
   );

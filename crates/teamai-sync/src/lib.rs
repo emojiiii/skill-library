@@ -6,11 +6,11 @@ use std::path::{Path, PathBuf};
 use teamai_core::{AppPaths, RiskLevel, UpdatePolicy, WorkspaceRef};
 use teamai_installer::{InstallOptions, InstallReport, TargetRoot};
 use teamai_manifest::{effective_risk, SkillAsset};
-use teamai_provider::{PageOpts, Provider, ProviderError, WebhookConfig, Workspace};
+use teamai_provider::{GitRef, PageOpts, Provider, ProviderError, WebhookConfig, Workspace};
 use teamai_provider_github::{
     scan::{
-        read_skill_detail, scan_workspace_detail, scan_workspace_skills, SkillDetailScan,
-        WorkspaceDetailScan,
+        read_skill_detail, scan_skill_assets_streaming, scan_workspace_detail,
+        scan_workspace_skills, SkillDetailScan, WorkspaceDetailScan,
     },
     GitHubProvider,
 };
@@ -35,6 +35,8 @@ pub enum SyncError {
     InvalidSource(String),
     #[error("subscription not found: {0}")]
     NotFound(String),
+    #[error("remote resource not found: {0}")]
+    RemoteNotFound(String),
     #[error(
         "risk confirmation required for {asset_id}: {risk_level} risk permissions [{permissions}]"
     )]
@@ -388,9 +390,8 @@ pub fn subscribe(
     let path = path.as_ref();
     let mut file = read_subscriptions(path)?;
     subscription.subscribed_at.get_or_insert_with(Utc::now);
-    if subscription.targets.enabled_targets().is_empty() {
-        subscription.targets = TargetSelection::all_default();
-    }
+    // No "empty targets → all tools" fallback: an empty selection is a
+    // deliberate "download locally, deploy nowhere" choice and must be honored.
     file.subscriptions.retain(|existing| {
         !(existing.workspace == subscription.workspace
             && existing.asset_id == subscription.asset_id)
@@ -549,6 +550,31 @@ pub async fn scan_github_workspace_skills(
     })
 }
 
+/// Streaming variant: calls `on_batch` after each batch of skills is parsed,
+/// allowing the caller to emit incremental progress events.
+pub async fn scan_github_workspace_skills_streaming(
+    workspace: &WorkspaceRef,
+    token: Option<&str>,
+    on_batch: impl FnMut(&[SkillAsset]),
+) -> Result<RemoteWorkspaceSkills> {
+    if workspace.provider != "github" {
+        return Err(SyncError::NotFound(format!(
+            "provider {} is not supported",
+            workspace.provider
+        )));
+    }
+    let provider = github_provider(workspace, token)?;
+    let ws = provider.get_workspace(workspace).await.map_err(sync_provider_error)?;
+    let branch = teamai_provider::GitRef::Branch(ws.default_branch.clone());
+    let skills = scan_skill_assets_streaming(&provider, workspace, &branch, on_batch)
+        .await
+        .map_err(sync_provider_error)?;
+    Ok(RemoteWorkspaceSkills {
+        workspace: ws,
+        skills,
+    })
+}
+
 pub async fn scan_github_workspace_detail(
     workspace: &WorkspaceRef,
     token: Option<&str>,
@@ -675,22 +701,23 @@ pub async fn rollback_asset(
     } else {
         options.targets
     };
-    let ref_name = ref_name_for_version(&version);
     let source = if let Some(source_override) = options.source_override {
         DownloadedSkillSource {
             source_dir: source_override,
             source_hash: None,
+            ref_name: ref_name_for_version(&version),
         }
     } else {
         download_skill_source(
             paths,
             &workspace,
             &asset_id,
-            &ref_name,
+            &version,
             options.token.as_deref(),
         )
         .await?
     };
+    let ref_name = source.ref_name.clone();
     ensure_risk_allowed(&source.source_dir, &asset_id, options.allow_risky)?;
     let install = teamai_installer::install(InstallOptions {
         source_dir: source.source_dir.clone(),
@@ -753,7 +780,7 @@ async fn sync_subscription(
         return Ok(SyncItemReport {
             workspace: subscription.workspace.clone(),
             asset_id: subscription.asset_id.clone(),
-            ref_name: Some(ref_name_for_version(&latest)),
+            ref_name: Some(latest.clone()),
             version: Some(latest),
             decision,
             source_path: None,
@@ -764,22 +791,23 @@ async fn sync_subscription(
         });
     }
 
-    let ref_name = ref_name_for_version(&latest);
     let source = if let Some(source_override) = &options.source_override {
         DownloadedSkillSource {
             source_dir: source_override.clone(),
             source_hash: None,
+            ref_name: ref_name_for_version(&latest),
         }
     } else {
         download_skill_source(
             paths,
             &subscription.workspace,
             &subscription.asset_id,
-            &ref_name,
+            &latest,
             token,
         )
         .await?
     };
+    let ref_name = source.ref_name.clone();
     ensure_risk_allowed(
         &source.source_dir,
         &subscription.asset_id,
@@ -890,27 +918,67 @@ async fn latest_version_for_subscription(
 struct DownloadedSkillSource {
     source_dir: PathBuf,
     source_hash: Option<String>,
+    /// The git ref actually downloaded (a tag when one matches the version,
+    /// otherwise the repo's default branch).
+    ref_name: String,
+}
+
+/// Resolve which git ref to download for a given version.
+///
+/// Public skill repos frequently have NO version tags — a single push often
+/// changes several skills at once, so per-skill semver tagging isn't done. When
+/// no tag matches we fall back to the repo's default branch (e.g. `main`).
+/// A matching tag is preferred when present (reproducible historical installs).
+async fn resolve_download_ref(
+    provider: &GitHubProvider,
+    workspace: &WorkspaceRef,
+    version: &str,
+) -> Result<String> {
+    let normalized = version.trim_start_matches('v');
+    let tags = provider
+        .list_tags(
+            workspace,
+            PageOpts {
+                cursor: None,
+                per_page: Some(100),
+            },
+        )
+        .await
+        .map_err(sync_provider_error)?;
+    if let Some(tag) = tags
+        .items
+        .into_iter()
+        .find(|tag| tag.name == version || tag.name.trim_start_matches('v') == normalized)
+    {
+        return Ok(tag.name);
+    }
+    let ws = provider
+        .get_workspace(workspace)
+        .await
+        .map_err(sync_provider_error)?;
+    Ok(ws.default_branch)
 }
 
 async fn download_skill_source(
     paths: &AppPaths,
     workspace: &WorkspaceRef,
     asset_id: &str,
-    ref_name: &str,
+    version: &str,
     token: Option<&str>,
 ) -> Result<DownloadedSkillSource> {
     let provider = github_provider(workspace, token)?;
+    let git_ref = resolve_download_ref(&provider, workspace, version).await?;
     let cache_dir = paths
         .workspaces
         .join(workspace.storage_key())
         .join("cache")
-        .join(safe_filename(ref_name));
+        .join(safe_filename(&git_ref));
     if cache_dir.exists() {
         fs::remove_dir_all(&cache_dir)?;
     }
     fs::create_dir_all(&cache_dir)?;
     let archive = provider
-        .download_tarball(workspace, ref_name, &cache_dir)
+        .download_tarball(workspace, &git_ref, &cache_dir)
         .await
         .map_err(sync_provider_error)?;
     let assets = teamai_manifest::scan_workspace(&archive.extracted_root)?;
@@ -921,9 +989,131 @@ async fn download_skill_source(
     Ok(DownloadedSkillSource {
         source_dir: archive.extracted_root.join(asset.path),
         source_hash: Some(format!("sha256:{}", archive.sha256)),
+        ref_name: git_ref,
     })
 }
 
+/// A skill's full source tree, downloaded and cached locally, ready to feed to
+/// the AI reviewer. The whole repo tarball is fetched once per resolved commit
+/// and extracted under `workspaces/{key}/review-cache/{sha}`; we point at the
+/// skill's subdirectory inside it.
+#[derive(Debug, Clone)]
+pub struct PreparedSkillReview {
+    /// Absolute path to the skill's directory on disk.
+    pub skill_dir: PathBuf,
+    /// The git ref that was requested (branch/tag/sha), for display.
+    pub ref_name: String,
+    /// The immutable commit the cache is keyed on.
+    pub commit_sha: String,
+}
+
+/// Download (or reuse a cached copy of) the entire skill source so it can be
+/// reviewed in full — not just SKILL.md.
+///
+/// Caching is keyed on the skill directory's latest commit SHA rather than the
+/// ref name: a tag/sha is immutable, but a branch advances, and reviewing a
+/// stale cached copy while reporting "safe" would be dangerous. We resolve the
+/// ref to the current commit touching this skill, and reuse the cache only when
+/// that commit matches what we last extracted.
+pub async fn prepare_skill_for_review(
+    paths: &AppPaths,
+    workspace: &WorkspaceRef,
+    skill_path: &str,
+    ref_name: Option<&str>,
+    token: Option<&str>,
+) -> Result<PreparedSkillReview> {
+    let provider = github_provider(workspace, token)?;
+
+    // Resolve the requested ref (or default branch) to a concrete name.
+    let git_ref = match ref_name.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(name) => name.to_owned(),
+        None => {
+            provider
+                .get_workspace(workspace)
+                .await
+                .map_err(sync_provider_error)?
+                .default_branch
+        }
+    };
+
+    let skill_path = skill_path.trim_matches('/');
+
+    // Resolve to the latest commit touching this skill on that ref. This is the
+    // immutable cache key; if it can't be resolved, fall back to the ref name.
+    let commit_sha = provider
+        .list_path_commits(workspace, skill_path, Some(&git_ref), 1)
+        .await
+        .ok()
+        .and_then(|commits| commits.into_iter().next())
+        .map(|commit| commit.sha)
+        .unwrap_or_else(|| git_ref.clone());
+
+    let cache_root = paths
+        .workspaces
+        .join(workspace.storage_key())
+        .join("review-cache")
+        .join(safe_filename(&commit_sha));
+
+    // The extracted tarball root is `<cache_root>/<owner>-<repo>-<sha>/`; the
+    // skill lives under that. We persist the extracted-root path in a marker so
+    // a cache hit can locate it without re-listing.
+    let marker = cache_root.join(".extracted-root");
+
+    let extracted_root = if marker.exists() {
+        let stored = fs::read_to_string(&marker)?;
+        let root = PathBuf::from(stored.trim());
+        if root.exists() {
+            root
+        } else {
+            download_review_tarball(&provider, workspace, &git_ref, &cache_root, &marker).await?
+        }
+    } else {
+        download_review_tarball(&provider, workspace, &git_ref, &cache_root, &marker).await?
+    };
+
+    let skill_dir = if skill_path.is_empty() {
+        extracted_root
+    } else {
+        extracted_root.join(skill_path)
+    };
+
+    if !skill_dir.exists() {
+        return Err(SyncError::NotFound(format!(
+            "skill '{skill_path}' not found in {}",
+            workspace.full_name()
+        )));
+    }
+
+    Ok(PreparedSkillReview {
+        skill_dir,
+        ref_name: git_ref,
+        commit_sha,
+    })
+}
+
+/// Download and extract the repo tarball into `cache_root`, recording the
+/// extracted-root path in `marker` for later cache hits.
+async fn download_review_tarball(
+    provider: &GitHubProvider,
+    workspace: &WorkspaceRef,
+    git_ref: &str,
+    cache_root: &Path,
+    marker: &Path,
+) -> Result<PathBuf> {
+    if cache_root.exists() {
+        fs::remove_dir_all(cache_root)?;
+    }
+    fs::create_dir_all(cache_root)?;
+    let archive = provider
+        .download_tarball(workspace, git_ref, cache_root)
+        .await
+        .map_err(sync_provider_error)?;
+    fs::write(marker, archive.extracted_root.to_string_lossy().as_bytes())?;
+    Ok(archive.extracted_root)
+}
+
+/// Conventional ref placeholder for a version when no real git ref was
+/// resolved (e.g. a local `source_override` that bypasses network download).
 fn ref_name_for_version(version: &str) -> String {
     if version.starts_with('v') {
         version.to_owned()
@@ -1001,7 +1191,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
 
 fn sync_provider_error(err: ProviderError) -> SyncError {
     match err {
-        ProviderError::NotFound { resource, .. } => SyncError::NotFound(resource),
+        ProviderError::NotFound { resource, .. } => SyncError::RemoteNotFound(resource),
         ProviderError::InvalidResponse(message)
         | ProviderError::ProviderUnavailable { message, .. }
         | ProviderError::Forbidden {
@@ -1152,6 +1342,33 @@ mod tests {
         .unwrap();
         assert_eq!(file.subscriptions.len(), 1);
         assert_eq!(file.subscriptions[0].version.as_deref(), Some("1.0.0"));
+    }
+
+    #[test]
+    fn subscribe_preserves_empty_targets_for_download_only() {
+        // An empty target selection is a deliberate "download locally, deploy
+        // nowhere" choice and must NOT be expanded to all tools.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("subscriptions.yaml");
+        let workspace = WorkspaceRef::github("acme", "team-skills");
+        let file = subscribe(
+            &path,
+            Subscription {
+                workspace,
+                asset_id: "code-reviewer".to_owned(),
+                channel: "stable".to_owned(),
+                version: None,
+                update: UpdatePolicy::Manual,
+                targets: TargetSelection::default(),
+                subscribed_at: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(file.subscriptions.len(), 1);
+        assert!(
+            file.subscriptions[0].targets.enabled_targets().is_empty(),
+            "empty targets must be preserved, not expanded to all tools"
+        );
     }
 
     #[test]

@@ -34,7 +34,7 @@ import { SettingsDialog } from "./SettingsDialog";
 import { AddWorkspaceDialog } from "../widgets/AddWorkspaceDialog";
 import { PushModal } from "../widgets/PushModal";
 import { formatError, openExternalUrl } from "../utils/format";
-import { type AppPage, routeToPage, workspaceFromPathname } from "../utils/navigation";
+import { type AppPage, routeToPage } from "../utils/navigation";
 import { useAppStore } from "../state/appStore";
 
 /**
@@ -69,11 +69,20 @@ export function RootLayout() {
   const setGithubToken = useAppStore((s) => s.setGithubToken);
   const dismissedError = useAppStore((s) => s.dismissedError);
   const setDismissedError = useAppStore((s) => s.setDismissedError);
+  const authIntent = useAppStore((s) => s.authIntent);
+  const clearAuthIntent = useAppStore((s) => s.clearAuthIntent);
+  const requestAuth = useAppStore((s) => s.requestAuth);
 
   // --- Route-derived ---
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const currentPage = routeToPage(pathname);
-  const workspaceRef = workspaceFromPathname(pathname) ?? "";
+
+  // The active workspace is a global selection (store), not part of the URL.
+  // This is the single source of truth — selecting a workspace sets it, and it
+  // persists across personal pages (discover / my-skills / ...).
+  const selectedWorkspace = useAppStore((s) => s.selectedWorkspace);
+  const setSelectedWorkspace = useAppStore((s) => s.setSelectedWorkspace);
+  const workspaceRef = selectedWorkspace ?? "";
 
   // --- Local state (auth device flow, deep links) ---
   const [githubDevice, setGithubDevice] = useState<GitHubDeviceStartResult | null>(null);
@@ -97,6 +106,13 @@ export function RootLayout() {
   const workspaceMeta = workspaces.data?.workspaces.find((w) => w.full_name === workspaceRef) ?? null;
 
   // --- Mutations ---
+  // Run the pending just-in-time auth action (if any) after a successful login.
+  function resumeAuthIntent() {
+    const intent = useAppStore.getState().authIntent;
+    intent?.resume?.();
+    clearAuthIntent();
+  }
+
   const githubLogin = useMutation({
     mutationFn: loginGithubToken,
     onSuccess: () => {
@@ -104,6 +120,7 @@ export function RootLayout() {
       auth.refetch();
       githubRepos.refetch();
       setAuthDialogOpen(false);
+      resumeAuthIntent();
     },
   });
 
@@ -126,6 +143,7 @@ export function RootLayout() {
         auth.refetch();
         githubRepos.refetch();
         setAuthDialogOpen(false);
+        resumeAuthIntent();
         return;
       }
       if (result.status === "slowDown") {
@@ -141,8 +159,8 @@ export function RootLayout() {
     onSuccess: (workspace) => {
       workspaces.refetch();
       setAddWorkspaceOpen(false);
-      const [owner, repo] = workspace.full_name.split("/");
-      navigate({ to: "/workspace/$owner/$repo", params: { owner, repo } });
+      setSelectedWorkspace(workspace.full_name);
+      navigate({ to: "/skills" });
     },
   });
 
@@ -152,8 +170,8 @@ export function RootLayout() {
       workspaces.refetch();
       setAddWorkspaceOpen(false);
       setManualPath("");
-      const [owner, repo] = workspace.full_name.split("/");
-      navigate({ to: "/workspace/$owner/$repo", params: { owner, repo } });
+      setSelectedWorkspace(workspace.full_name);
+      navigate({ to: "/skills" });
     },
   });
 
@@ -196,8 +214,8 @@ export function RootLayout() {
     onSuccess: (ws) => {
       subscriptions.refetch();
       if (ws) {
-        const [owner, repo] = ws.split("/");
-        navigate({ to: "/workspace/$owner/$repo", params: { owner, repo } });
+        setSelectedWorkspace(ws);
+        navigate({ to: "/skills" });
       }
       setDeepLink(null);
     },
@@ -244,14 +262,14 @@ export function RootLayout() {
     };
   }, []);
 
-  // Auto-navigate to first workspace on startup (when at index route)
+  // Startup landing: the consumer discover screen is the default home. We no
+  // longer auto-jump into a workspace — that was a developer-centric default
+  // and breaks for anonymous users who have no saved workspaces.
   useEffect(() => {
-    if (!workspaceRef && pathname === "/" && workspaces.data?.workspaces.length) {
-      const first = workspaces.data.workspaces[0];
-      const [owner, repo] = first.full_name.split("/");
-      navigate({ to: "/workspace/$owner/$repo", params: { owner, repo } });
+    if (pathname === "/") {
+      navigate({ to: "/discover" });
     }
-  }, [workspaces.data?.workspaces, workspaceRef, pathname]);
+  }, [pathname]);
 
   // --- Derived ---
   const isAuthenticated = Boolean(auth.data?.githubLogin);
@@ -273,10 +291,14 @@ export function RootLayout() {
 
   const navCounts: Partial<Record<AppPage, number>> = {
     subscriptions: subscriptions.data?.subscriptions.length,
-    installed: localAgents.data
-      ? new Set(localAgents.data.flatMap((g) => g.entries.map((e) => e.id))).size
-      : undefined,
   };
+
+  // Open the just-in-time auth dialog whenever a gated action sets an intent.
+  useEffect(() => {
+    if (authIntent && !isAuthenticated) {
+      setAuthDialogOpen(true);
+    }
+  }, [authIntent, isAuthenticated]);
 
   // --- Loading state ---
   if (auth.isLoading) {
@@ -288,26 +310,11 @@ export function RootLayout() {
   }
 
   // --- Login screen ---
-  if (!isAuthenticated) {
-    return (
-      <LoginScreen
-        onStartDevice={() => githubDeviceStart.mutate(undefined)}
-        startPending={githubDeviceStart.isPending}
-        startError={githubDeviceStart.error ? formatError(githubDeviceStart.error) : null}
-        device={githubDevice}
-        deviceStatus={githubDeviceStatus}
-        pollPending={githubDevicePoll.isPending}
-        pollError={githubDevicePoll.error ? formatError(githubDevicePoll.error) : null}
-        githubToken={githubToken}
-        setGithubToken={setGithubToken}
-        onSaveToken={() => githubLogin.mutate(githubToken)}
-        savePending={githubLogin.isPending}
-        saveError={githubLogin.error ? formatError(githubLogin.error) : null}
-        authScopes={auth.data?.githubScopes ?? []}
-        authWarning={auth.data?.warning}
-      />
-    );
-  }
+  // No hard login wall: the consumer layer (discover / my skills) is fully
+  // anonymous. GitHub sign-in is requested just-in-time via AuthDialog when a
+  // gated action (publish, comment, manage) needs it. `LoginScreen` is kept
+  // importable for the optional first-run welcome but is no longer a gate.
+  void LoginScreen;
 
   return (
     <div className="app-shell">
@@ -323,13 +330,18 @@ export function RootLayout() {
         }
         saved={workspaces.data?.workspaces ?? []}
         onSelectWorkspace={(workspace) => {
-          const [owner, repo] = workspace.full_name.split("/");
-          navigate({ to: "/workspace/$owner/$repo", params: { owner, repo } });
+          setSelectedWorkspace(workspace.full_name);
+          navigate({ to: "/skills" });
         }}
         onOpenAddDialog={() => setAddWorkspaceOpen(true)}
         counts={navCounts}
         authLogin={auth.data?.githubLogin}
-        onOpenAccount={() => setSettingsOpen(true)}
+        isCreatorMode={isAuthenticated}
+        onOpenAccount={() =>
+          isAuthenticated
+            ? setSettingsOpen(true)
+            : requestAuth({ action: "manage" })
+        }
       />
 
       <main className="app-shell__main">
@@ -419,7 +431,11 @@ export function RootLayout() {
 
       <AuthDialog
         open={authDialogOpen}
-        onOpenChange={setAuthDialogOpen}
+        onOpenChange={(value) => {
+          setAuthDialogOpen(value);
+          if (!value) clearAuthIntent();
+        }}
+        intentReason={authIntent ? t(`auth.reason.${authIntent.action}`) : undefined}
         authLogin={auth.data?.githubLogin}
         authScopes={auth.data?.githubScopes ?? []}
         authWarning={auth.data?.warning}

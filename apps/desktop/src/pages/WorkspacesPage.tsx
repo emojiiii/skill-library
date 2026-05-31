@@ -20,6 +20,7 @@ export function WorkspacesPage({
   workspaceMeta,
   workspaceDetail,
   workspaceRef,
+  canViewFiles,
   scanPending,
   isRefreshing,
   detailPanel,
@@ -38,6 +39,7 @@ export function WorkspacesPage({
   workspaceMeta: Workspace | null;
   workspaceDetail: WorkspaceDetail | null;
   workspaceRef: string;
+  canViewFiles: boolean;
   scanPending: boolean;
   isRefreshing?: boolean;
   detailPanel: ReactNode;
@@ -176,6 +178,7 @@ export function WorkspacesPage({
                 selected={selected}
                 selectedFile={selectedFile}
                 workspace={workspaceRef}
+                canViewFiles={canViewFiles}
                 onSelectAsset={(asset) => {
                   onSelectAsset(asset);
                   onSelectRef(undefined);

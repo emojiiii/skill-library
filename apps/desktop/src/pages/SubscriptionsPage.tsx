@@ -1,6 +1,7 @@
 import { useLocale } from "../hooks/useLocale";
 import type { Subscription } from "../lib/teamai";
 import { formatRelativeTime } from "../utils/format";
+import { Card } from "../widgets/Card";
 import { MetricTile } from "../widgets/MetricTile";
 import { Pill } from "../widgets/Pill";
 
@@ -38,14 +39,14 @@ export function SubscriptionsPage({
           />
         </div>
 
-        <div className="card overflow-hidden">
-          <div className="card-header">
+        <Card className="overflow-hidden p-0 gap-0">
+          <Card.Header>
             <div>
-              <div className="card-title">{t("subscriptions.declarations")}</div>
-              <div className="card-subtitle">~/.team-ai-hub/subscriptions.yaml</div>
+              <Card.Title>{t("subscriptions.declarations")}</Card.Title>
+              <Card.Subtitle>~/.team-ai-hub/subscriptions.yaml</Card.Subtitle>
             </div>
             <Pill>{t("subscriptions.entries").replace("{count}", String(total))}</Pill>
-          </div>
+          </Card.Header>
           {total === 0 ? (
             <div className="empty-state">
               <div className="empty-state__title">{t("subscriptions.empty")}</div>
@@ -89,7 +90,7 @@ export function SubscriptionsPage({
               })}
             </div>
           )}
-        </div>
+        </Card>
       </div>
     </section>
   );

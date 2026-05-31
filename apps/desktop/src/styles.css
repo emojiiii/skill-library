@@ -1,6 +1,14 @@
 @import "tailwindcss";
 @import "@heroui/styles";
 
+/*
+ * Theme bridge — the app's legacy tokens (--bg / --fg / --brand / --line, used
+ * in 400+ places) now POINT AT HeroUI's semantic theme tokens. This is what
+ * makes the app actually adopt HeroUI's native look (colors, dark mode, accent)
+ * instead of a parallel hand-tuned palette. HeroUI flips its own tokens on the
+ * `.dark` class (which useTheme() already toggles), so we no longer redefine
+ * colors per-mode here — they follow HeroUI automatically.
+ */
 :root {
   font-family:
     "Inter",
@@ -9,129 +17,68 @@
     ui-sans-serif,
     system-ui,
     sans-serif;
-  color-scheme: light;
 
-  /* Surface tokens — neutral, slightly cool */
-  --bg: #f7f8fa;
-  --bg-elevated: #ffffff;
-  --bg-soft: #f1f3f6;
-  --bg-sidebar: #fbfbfc;
-  --bg-active: #eef0f3;
+  /* Surfaces → HeroUI surface scale */
+  --bg: var(--background);
+  --bg-elevated: var(--surface);
+  --bg-soft: var(--surface-secondary);
+  --bg-sidebar: var(--background-secondary);
+  --bg-active: var(--surface-tertiary);
 
-  --fg: #0f1115;
-  --fg-secondary: #4b5563;
-  --fg-muted: #6b7280;
-  --fg-disabled: #9ca3af;
+  /* Text → HeroUI foreground / muted */
+  --fg: var(--foreground);
+  --fg-secondary: var(--muted);
+  --fg-muted: var(--muted);
+  --fg-disabled: color-mix(in oklab, var(--muted) 55%, transparent);
 
-  --line: #e5e7eb;
-  --line-strong: #d1d5db;
+  /* Borders → HeroUI border scale */
+  --line: var(--border);
+  --line-strong: var(--border-secondary);
 
-  /* Brand — desaturated indigo (default accent: blue) */
-  --brand: #4f46e5;
-  --brand-hover: #4338ca;
-  --brand-soft: #eef2ff;
-  --brand-fg: #312e81;
+  /* Brand → HeroUI accent */
+  --brand: var(--accent);
+  --brand-hover: var(--accent-hover);
+  --brand-soft: var(--accent-soft);
+  --brand-fg: var(--accent-soft-foreground);
 
-  /* Status */
-  --success: #15803d;
-  --success-soft: #dcfce7;
-  --warning: #b45309;
-  --warning-soft: #fef3c7;
-  --danger: #b91c1c;
-  --danger-soft: #fee2e2;
-  --info: #1d4ed8;
+  /* Status: HeroUI provides --success/--warning/--danger and their -soft
+     variants for both light and dark. We only add the soft *foregrounds* the
+     app references and an --info color HeroUI doesn't ship. */
+  --info: var(--accent);
 
-  /* Code */
+  /* Code panel stays intentionally dark in both themes */
   --code-bg: #0f172a;
   --code-fg: #e2e8f0;
 
-  /* Misc */
-  --radius: 8px;
+  /* Misc — keep app's own radius/shadow scale (HeroUI's --radius is 0.5rem == 8px) */
   --radius-lg: 12px;
   --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.04);
   --shadow-md: 0 4px 12px -4px rgb(15 23 42 / 0.08), 0 0 0 1px rgb(15 23 42 / 0.02);
   --shadow-popover: 0 10px 32px -8px rgb(15 23 42 / 0.18), 0 0 0 1px rgb(15 23 42 / 0.06);
 }
 
-/* ---------- Dark theme ---------- */
+/* Dark mode: only app-specific tokens HeroUI can't supply. All bridged tokens
+   (--bg/--fg/--brand/--line/--success/...) follow HeroUI's own .dark values. */
 :root.dark {
-  color-scheme: dark;
-
-  --bg: #0f1117;
-  --bg-elevated: #1a1d27;
-  --bg-soft: #151820;
-  --bg-sidebar: #12141c;
-  --bg-active: #1f2330;
-
-  --fg: #e8eaf0;
-  --fg-secondary: #a1a8b8;
-  --fg-muted: #6b7490;
-  --fg-disabled: #4a5168;
-
-  --line: #262a36;
-  --line-strong: #363b4a;
-
-  --brand: #6366f1;
-  --brand-hover: #818cf8;
-  --brand-soft: rgba(99, 102, 241, 0.12);
-  --brand-fg: #c7d2fe;
-
-  --success: #4ade80;
-  --success-soft: rgba(74, 222, 128, 0.1);
-  --warning: #fbbf24;
-  --warning-soft: rgba(251, 191, 36, 0.1);
-  --danger: #f87171;
-  --danger-soft: rgba(248, 113, 113, 0.1);
-  --info: #60a5fa;
-
-  --code-bg: #0c0e14;
-  --code-fg: #e2e8f0;
-
   --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.2);
   --shadow-md: 0 4px 12px -4px rgb(0 0 0 / 0.4), 0 0 0 1px rgb(255 255 255 / 0.04);
   --shadow-popover: 0 10px 32px -8px rgb(0 0 0 / 0.6), 0 0 0 1px rgb(255 255 255 / 0.06);
 }
 
-/* ---------- Accent: purple ---------- */
+/* ---------- Accent overrides ---------- */
+/* Override HeroUI's --accent; everything downstream (--brand etc.) follows.
+   --accent-foreground is the text color shown ON a solid accent fill. */
 :root.accent-purple {
-  --brand: #7c3aed;
-  --brand-hover: #6d28d9;
-  --brand-soft: #f5f3ff;
-  --brand-fg: #4c1d95;
+  --accent: oklch(0.55 0.22 295);
+  --accent-foreground: var(--snow);
 }
-:root.dark.accent-purple {
-  --brand: #a78bfa;
-  --brand-hover: #c4b5fd;
-  --brand-soft: rgba(167, 139, 250, 0.12);
-  --brand-fg: #ede9fe;
-}
-
-/* ---------- Accent: green ---------- */
 :root.accent-green {
-  --brand: #059669;
-  --brand-hover: #047857;
-  --brand-soft: #ecfdf5;
-  --brand-fg: #064e3b;
+  --accent: oklch(0.6 0.15 162);
+  --accent-foreground: var(--snow);
 }
-:root.dark.accent-green {
-  --brand: #34d399;
-  --brand-hover: #6ee7b7;
-  --brand-soft: rgba(52, 211, 153, 0.12);
-  --brand-fg: #d1fae5;
-}
-
-/* ---------- Accent: orange ---------- */
 :root.accent-orange {
-  --brand: #ea580c;
-  --brand-hover: #c2410c;
-  --brand-soft: #fff7ed;
-  --brand-fg: #7c2d12;
-}
-:root.dark.accent-orange {
-  --brand: #fb923c;
-  --brand-hover: #fdba74;
-  --brand-soft: rgba(251, 146, 60, 0.12);
-  --brand-fg: #ffedd5;
+  --accent: oklch(0.67 0.19 47);
+  --accent-foreground: var(--snow);
 }
 
 * {
@@ -642,38 +589,7 @@ a[class*="text-white"] {
   margin-top: 1px;
 }
 
-/* ---------- Cards ---------- */
-.card {
-  background: var(--bg-elevated);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-}
-
-.card-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 14px 16px;
-  border-bottom: 1px solid var(--line);
-}
-
-.card-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--fg);
-}
-
-.card-subtitle {
-  font-size: 12px;
-  color: var(--fg-muted);
-  margin-top: 2px;
-}
-
-.card-body {
-  padding: 16px;
-}
-
+/* ---------- Card rows (list items) ---------- */
 .card-row {
   display: flex;
   align-items: center;
@@ -727,8 +643,38 @@ a[class*="text-white"] {
   flex-shrink: 0;
 }
 
+.skill-row__chevron {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  color: var(--fg-muted);
+  flex-shrink: 0;
+}
+
+.skill-row:hover .skill-row__chevron {
+  color: var(--fg-secondary);
+}
+
 .skill-row.selected .skill-row__icon {
   color: var(--brand-fg);
+}
+
+/* Expand/collapse animation for the per-skill file tree.
+   grid-template-rows 0fr → 1fr animates auto height smoothly. */
+.skill-item__files {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.18s ease;
+}
+
+.skill-item__files.is-open {
+  grid-template-rows: 1fr;
+}
+
+.skill-item__files-inner {
+  overflow: hidden;
+  min-height: 0;
 }
 
 .skill-row__body {
@@ -1000,42 +946,6 @@ a[class*="text-white"] {
   margin-top: auto;
 }
 
-/* ---------- Pills (Badge replacement) ---------- */
-.pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 7px;
-  height: 20px;
-  border-radius: 5px;
-  background: var(--bg-soft);
-  color: var(--fg-secondary);
-  font-size: 11px;
-  font-weight: 500;
-  letter-spacing: -0.005em;
-  white-space: nowrap;
-}
-
-.pill--success {
-  background: var(--success-soft);
-  color: var(--success);
-}
-.pill--warning {
-  background: var(--warning-soft);
-  color: var(--warning);
-}
-.pill--danger {
-  background: var(--danger-soft);
-  color: var(--danger);
-}
-.pill--brand {
-  background: var(--brand-soft);
-  color: var(--brand-fg);
-}
-.pill--mono {
-  font-family: "SFMono-Regular", "JetBrains Mono", ui-monospace, monospace;
-}
-
 /* ---------- Device code panel ---------- */
 .device-code {
   margin-top: 16px;
@@ -1172,69 +1082,6 @@ a[class*="text-white"] {
 
 .device-code__status {
   font-weight: 500;
-}
-
-/* ---------- Segmented tabs (underline) ---------- */
-.segmented-tabs {
-  display: inline-flex;
-  align-items: center;
-  gap: 18px;
-  border-bottom: 1px solid var(--line);
-  padding: 0;
-}
-
-.segmented-tab {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 10px 0;
-  background: transparent;
-  border: 0;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--fg-muted);
-  cursor: pointer;
-  transition: color 0.12s ease;
-}
-
-.segmented-tab:hover {
-  color: var(--fg-secondary);
-}
-
-.segmented-tab.is-active {
-  color: var(--fg);
-}
-
-.segmented-tab.is-active::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: -1px;
-  height: 2px;
-  border-radius: 2px;
-  background: var(--brand);
-}
-
-.segmented-tab__count {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 18px;
-  padding: 0 5px;
-  height: 16px;
-  border-radius: 999px;
-  background: var(--bg-soft);
-  color: var(--fg-muted);
-  font-size: 10.5px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-
-.segmented-tab.is-active .segmented-tab__count {
-  background: var(--brand-soft);
-  color: var(--brand-fg);
 }
 
 /* ---------- Code editor (CodeMirror) ---------- */
@@ -1421,18 +1268,6 @@ a[class*="text-white"] {
 .scroll-area {
   overflow-y: auto;
   scrollbar-gutter: stable;
-}
-
-.kbd {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 5px;
-  font-size: 10.5px;
-  font-family: "SFMono-Regular", "JetBrains Mono", ui-monospace, monospace;
-  background: var(--bg-soft);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  color: var(--fg-muted);
 }
 
 /* ---------- Login screen ---------- */

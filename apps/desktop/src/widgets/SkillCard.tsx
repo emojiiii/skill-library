@@ -1,4 +1,4 @@
-import { Package } from "lucide-react";
+import { ChevronDown, ChevronRight, Package } from "lucide-react";
 import type { SkillAsset } from "../lib/teamai";
 
 export function SkillCard({
@@ -14,7 +14,13 @@ export function SkillCard({
 }) {
   return (
     <button type="button" className={`skill-row ${selected ? "selected" : ""}`} onClick={onSelect}>
-      <Package size={14} className="skill-row__icon" />
+      {expanded !== undefined ? (
+        <span className="skill-row__chevron" aria-hidden="true">
+          {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+        </span>
+      ) : (
+        <Package size={14} className="skill-row__icon" />
+      )}
 
       <div className="skill-row__body">
         <div className="skill-row__line1">

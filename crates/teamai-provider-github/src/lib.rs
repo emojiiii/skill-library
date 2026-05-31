@@ -1272,7 +1272,7 @@ fn provider_error_from_status(status: reqwest::StatusCode, message: String) -> P
             reason: Some(message),
         },
         404 => ProviderError::NotFound {
-            resource: "github resource".to_owned(),
+            resource: message,
             reference: None,
         },
         409 | 422 => ProviderError::Conflict {

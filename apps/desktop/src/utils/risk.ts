@@ -55,3 +55,49 @@ export const stateTone: Record<string, "success" | "warning" | "danger" | "defau
   declined: "danger",
   expired: "default",
 };
+
+// ---------------------------------------------------------------------------
+// Consumer-facing risk language.
+//
+// Non-technical users should never see "filesystem.write" or "critical risk".
+// These helpers translate the developer risk model into plain-language safety
+// signals. They build on the same effectiveRisk()/permissions data so there is
+// a single source of truth — only the wording differs.
+// ---------------------------------------------------------------------------
+
+export type SafetyLevel = "safe" | "caution" | "sensitive";
+
+/** Map the four-level developer risk to a three-level consumer safety signal. */
+export function safetyLevel(manifest: SkillManifest): SafetyLevel {
+  const risk = effectiveRisk(manifest);
+  if (risk === "low") return "safe";
+  if (risk === "medium") return "caution";
+  return "sensitive"; // high | critical
+}
+
+export const safetyTone: Record<SafetyLevel, "success" | "warning" | "danger"> = {
+  safe: "success",
+  caution: "warning",
+  sensitive: "danger",
+};
+
+/**
+ * Plain-language capability lines derived from declared permissions, e.g.
+ * "Can modify files on your computer". Returns an empty array when the skill
+ * only reads — the caller can then show a reassuring "read-only" message.
+ */
+export function plainPermissionLines(
+  manifest: SkillManifest,
+  t: (key: string) => string,
+): string[] {
+  const lines: string[] = [];
+  const perms = new Set(manifest.permissions);
+  if (perms.has("filesystem.write")) lines.push(t("safety.cap.writeFiles"));
+  if (perms.has("shell.execute") || perms.has("shell.execute.limited")) {
+    lines.push(t("safety.cap.runScripts"));
+  }
+  if (perms.has("network.external")) lines.push(t("safety.cap.network"));
+  if (perms.has("secrets.read")) lines.push(t("safety.cap.secrets"));
+  return lines;
+}
+

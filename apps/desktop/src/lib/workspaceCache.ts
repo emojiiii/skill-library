@@ -16,6 +16,7 @@ import {
 
 const CACHE_PREFIX = "teamai-ws-cache:";
 const TREE_PREFIX = "teamai-tree:";
+const DETAIL_PREFIX = "teamai-detail:";
 
 // ---------------------------------------------------------------------------
 // Helpers: encode/decode JSON ↔ base64 for SQLite BLOB storage (metadata only)
@@ -176,6 +177,48 @@ export async function putFileTreeInCache(
 export async function clearFileTree(workspace: string, skillPath: string): Promise<void> {
   try {
     const prefix = `${TREE_PREFIX}${workspace}:${skillPath}:`;
+    await dbCacheDeletePrefix(prefix);
+  } catch { /* ignore */ }
+}
+
+// ---------------------------------------------------------------------------
+// Skill detail cache (per skill path) — stored in SQLite. Lets clicking a
+// skill render instantly from cache while a fresh copy is fetched in the
+// background. Small JSON (manifest + readme + skill markdown + versions).
+// ---------------------------------------------------------------------------
+
+function detailKey(workspace: string, skillPath: string, refName?: string): string {
+  return `${DETAIL_PREFIX}${workspace}:${skillPath}:${refName ?? "HEAD"}`;
+}
+
+export async function getSkillDetailFromCache<T>(
+  workspace: string,
+  skillPath: string,
+  refName?: string,
+): Promise<T | null> {
+  try {
+    const raw = await dbCacheGet(detailKey(workspace, skillPath, refName));
+    if (!raw) return null;
+    return fromBase64<T>(raw);
+  } catch {
+    return null;
+  }
+}
+
+export async function putSkillDetailInCache(
+  workspace: string,
+  skillPath: string,
+  refName: string | undefined,
+  detail: unknown,
+): Promise<void> {
+  try {
+    await dbCachePut(detailKey(workspace, skillPath, refName), workspace, toBase64(detail));
+  } catch { /* non-critical */ }
+}
+
+export async function clearSkillDetail(workspace: string, skillPath: string): Promise<void> {
+  try {
+    const prefix = `${DETAIL_PREFIX}${workspace}:${skillPath}:`;
     await dbCacheDeletePrefix(prefix);
   } catch { /* ignore */ }
 }

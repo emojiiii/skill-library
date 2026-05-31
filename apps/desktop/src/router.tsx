@@ -6,8 +6,9 @@ import { WorkspacePublishRoute } from "./routes/WorkspacePublishRoute";
 import { WorkspaceInvitationsRoute } from "./routes/WorkspaceInvitationsRoute";
 import { WorkspaceActivityRoute } from "./routes/WorkspaceActivityRoute";
 import { SubscriptionsRoute } from "./routes/SubscriptionsRoute";
-import { InstalledRoute } from "./routes/InstalledRoute";
 import { CliRoute } from "./routes/CliRoute";
+import { DiscoverRoute } from "./routes/DiscoverRoute";
+import { MySkillsPage } from "./pages/MySkillsPage";
 
 const rootRoute = createRootRoute({
   component: RootLayout,
@@ -16,40 +17,54 @@ const rootRoute = createRootRoute({
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
-  component: () => null, // Auto-redirects to first workspace in RootLayout
+  component: () => null, // Auto-redirects to /discover in RootLayout
 });
 
-// Workspace layout route: /workspace/$owner/$repo
-const workspaceRoute = createRoute({
+// Consumer-layer (anonymous) top-level routes
+const discoverRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: "workspace/$owner/$repo",
+  path: "discover",
+  component: DiscoverRoute,
+});
+
+const mySkillsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "my-skills",
+  component: MySkillsPage,
+});
+
+// Workspace layout: a PATHLESS layout route. The active workspace is a global
+// selection (appStore.selectedWorkspace), NOT part of the URL — this is a
+// desktop app, so there's no benefit to encoding it in the path and doing so
+// caused the selection to reset on every personal page. WorkspaceShell provides
+// workspace context (and remounts children on workspace switch) for all four
+// workspace-scoped pages below.
+const workspaceLayoutRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  id: "workspace-layout",
   component: WorkspaceShell,
 });
 
-// Workspace sub-pages
-const workspaceIndexRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "/",
-  component: () => {
-    const { owner, repo } = workspaceIndexRoute.useParams();
-    return <WorkspaceSkillsRoute key={`${owner}/${repo}`} />;
-  },
+const skillsRoute = createRoute({
+  getParentRoute: () => workspaceLayoutRoute,
+  path: "skills",
+  component: WorkspaceSkillsRoute,
 });
 
 const publishRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
+  getParentRoute: () => workspaceLayoutRoute,
   path: "publish",
   component: WorkspacePublishRoute,
 });
 
-const invitationsRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "invitations",
+const membersRoute = createRoute({
+  getParentRoute: () => workspaceLayoutRoute,
+  path: "members",
   component: WorkspaceInvitationsRoute,
 });
 
 const activityRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
+  getParentRoute: () => workspaceLayoutRoute,
   path: "activity",
   component: WorkspaceActivityRoute,
 });
@@ -61,12 +76,6 @@ const subscriptionsRoute = createRoute({
   component: SubscriptionsRoute,
 });
 
-const installedRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "installed",
-  component: InstalledRoute,
-});
-
 const cliRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "cli",
@@ -75,14 +84,15 @@ const cliRoute = createRoute({
 
 const routeTree = rootRoute.addChildren([
   indexRoute,
-  workspaceRoute.addChildren([
-    workspaceIndexRoute,
+  discoverRoute,
+  mySkillsRoute,
+  workspaceLayoutRoute.addChildren([
+    skillsRoute,
     publishRoute,
-    invitationsRoute,
+    membersRoute,
     activityRoute,
   ]),
   subscriptionsRoute,
-  installedRoute,
   cliRoute,
 ]);
 

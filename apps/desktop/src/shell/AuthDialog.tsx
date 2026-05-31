@@ -12,6 +12,7 @@ export function AuthDialog({
   authLogin,
   authScopes,
   authWarning,
+  intentReason,
   onStartDevice,
   startPending,
   startError,
@@ -31,6 +32,7 @@ export function AuthDialog({
   authLogin: string | null | undefined;
   authScopes: string[];
   authWarning: string | null | undefined;
+  intentReason?: string;
   onStartDevice: () => void;
   startPending: boolean;
   startError?: string | null;
@@ -105,6 +107,11 @@ export function AuthDialog({
                 </div>
               ) : (
                 <>
+                  {intentReason ? (
+                    <div className="rounded-md border border-[var(--brand)] bg-[var(--brand-soft)] px-3 py-2.5 text-[12.5px] text-[var(--brand-fg)]">
+                      {intentReason}
+                    </div>
+                  ) : null}
                   <Button
                     fullWidth
                     className="h-11"

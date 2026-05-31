@@ -1,5 +1,6 @@
 import type { SemanticChange, SkillComparison } from "../lib/teamai";
 import { riskLabel, riskTone } from "../utils/risk";
+import { Card } from "./Card";
 import { Pill } from "./Pill";
 
 function formatChangeValue(value: unknown) {
@@ -36,19 +37,19 @@ function SemanticChangeRow({ change }: { change: SemanticChange }) {
 export function ComparisonView({ comparison }: { comparison: SkillComparison }) {
   return (
     <div className="space-y-3">
-      <div className="card overflow-hidden">
-        <div className="card-header">
+      <Card className="overflow-hidden p-0 gap-0">
+        <Card.Header>
           <div>
-            <div className="card-title">Manifest changes</div>
-            <div className="card-subtitle">
+            <Card.Title>Manifest changes</Card.Title>
+            <Card.Subtitle>
               {comparison.from} → {comparison.to}
-            </div>
+            </Card.Subtitle>
           </div>
           <Pill tone={comparison.semantic.length ? "warning" : "success"}>
             {comparison.semantic.length} changes
           </Pill>
-        </div>
-        <div className="card-body">
+        </Card.Header>
+        <Card.Body>
           {comparison.semantic.length ? (
             <div className="space-y-2">
               {comparison.semantic.map((change, index) => (
@@ -58,20 +59,20 @@ export function ComparisonView({ comparison }: { comparison: SkillComparison }) 
           ) : (
             <div className="text-sm text-[var(--muted)]">No manifest-level changes.</div>
           )}
-        </div>
-      </div>
+        </Card.Body>
+      </Card>
 
-      <div className="card overflow-hidden">
-        <div className="card-header">
+      <Card className="overflow-hidden p-0 gap-0">
+        <Card.Header>
           <div className="min-w-0">
-            <div className="card-title">File patches</div>
-            <div className="card-subtitle truncate">{comparison.skillPath}</div>
+            <Card.Title>File patches</Card.Title>
+            <Card.Subtitle className="truncate">{comparison.skillPath}</Card.Subtitle>
           </div>
           <Pill tone={comparison.files.length ? "default" : "success"}>
             {comparison.files.length} files
           </Pill>
-        </div>
-        <div className="card-body">
+        </Card.Header>
+        <Card.Body>
           {comparison.files.length ? (
             <div className="space-y-3">
               {comparison.files.map((file) => (
@@ -89,8 +90,8 @@ export function ComparisonView({ comparison }: { comparison: SkillComparison }) 
           ) : (
             <div className="text-sm text-[var(--muted)]">No file patches were returned for this skill path.</div>
           )}
-        </div>
-      </div>
+        </Card.Body>
+      </Card>
     </div>
   );
 }

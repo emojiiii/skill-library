@@ -6,7 +6,7 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   clearScreen: false,
   server: {
-    port: 1420,
+    port: 1421,
     strictPort: true,
     watch: {
       ignored: ["**/src-tauri/**"],

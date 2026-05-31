@@ -1,7 +1,8 @@
 import { ChevronDown, ChevronRight, Folder } from "lucide-react";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import type { SkillAsset } from "../lib/teamai";
 import { useLocalStorage } from "../hooks/useLocalStorage";
+import { useLocale } from "../hooks/useLocale";
 import { SkillCard } from "./SkillCard";
 import { SkillFileTree } from "./SkillFileTree";
 
@@ -45,6 +46,7 @@ function CategorySection({
   selectedFile,
   expandedSkills,
   workspace,
+  canViewFiles,
   onSelectAsset,
   onToggleExpand,
   onSelectFile,
@@ -55,6 +57,7 @@ function CategorySection({
   selectedFile: string | null;
   expandedSkills: string[];
   workspace: string;
+  canViewFiles: boolean;
   onSelectAsset: (asset: SkillAsset) => void;
   onToggleExpand: (id: string) => void;
   onSelectFile: (path: string | null) => void;
@@ -76,6 +79,7 @@ function CategorySection({
             selectedFile={selectedFile}
             isExpanded={expandedSkills.includes(asset.manifest.id)}
             workspace={workspace}
+            canViewFiles={canViewFiles}
             onSelectAsset={onSelectAsset}
             onToggleExpand={onToggleExpand}
             onSelectFile={onSelectFile}
@@ -111,6 +115,7 @@ function CategorySection({
               selectedFile={selectedFile}
               isExpanded={expandedSkills.includes(asset.manifest.id)}
               workspace={workspace}
+              canViewFiles={canViewFiles}
               onSelectAsset={onSelectAsset}
               onToggleExpand={onToggleExpand}
               onSelectFile={onSelectFile}
@@ -128,6 +133,7 @@ function SkillItem({
   selectedFile,
   isExpanded,
   workspace,
+  canViewFiles,
   onSelectAsset,
   onToggleExpand,
   onSelectFile,
@@ -137,35 +143,52 @@ function SkillItem({
   selectedFile: string | null;
   isExpanded: boolean;
   workspace: string;
+  canViewFiles: boolean;
   onSelectAsset: (asset: SkillAsset) => void;
   onToggleExpand: (id: string) => void;
   onSelectFile: (path: string | null) => void;
 }) {
+  const { t } = useLocale();
   const isSelected = selected?.manifest.id === asset.manifest.id;
+  // Mount the file tree only after the first expand, then keep it mounted so
+  // both expand and collapse animate (and the query fires only once needed).
+  const [hasExpanded, setHasExpanded] = useState(isExpanded);
+  if (isExpanded && !hasExpanded) setHasExpanded(true);
   return (
     <div>
       <SkillCard
         asset={asset}
         selected={isSelected}
+        expanded={isExpanded}
         onSelect={() => {
           onSelectAsset(asset);
           onToggleExpand(asset.manifest.id);
         }}
       />
-      {isExpanded && workspace ? (
-        <div className="ml-6 mt-0.5 mb-1.5 border-l-2 border-[var(--line)] pl-2">
-          <SkillFileTree
-            workspace={workspace}
-            skillPath={asset.path}
-            selectedFile={selectedFile}
-            onSelectFile={(path) => {
-              // Also select this skill when clicking a file under it
-              if (!isSelected) onSelectAsset(asset);
-              onSelectFile(path);
-            }}
-          />
+      <div className={`skill-item__files ${isExpanded ? "is-open" : ""}`}>
+        <div className="skill-item__files-inner">
+          {hasExpanded ? (
+            <div className="ml-6 mt-0.5 mb-1.5 border-l-2 border-[var(--line)] pl-2">
+              {canViewFiles && workspace ? (
+                <SkillFileTree
+                  workspace={workspace}
+                  skillPath={asset.path}
+                  selectedFile={selectedFile}
+                  onSelectFile={(path) => {
+                    // Also select this skill when clicking a file under it
+                    if (!isSelected) onSelectAsset(asset);
+                    onSelectFile(path);
+                  }}
+                />
+              ) : (
+                <div className="px-3 py-2 text-[11px] text-[var(--fg-muted)]">
+                  {t("workspaces.loginToViewFiles")}
+                </div>
+              )}
+            </div>
+          ) : null}
         </div>
-      ) : null}
+      </div>
     </div>
   );
 }
@@ -175,6 +198,7 @@ export function SkillListWithFiles({
   selected,
   selectedFile,
   workspace,
+  canViewFiles,
   onSelectAsset,
   onSelectFile,
 }: {
@@ -182,6 +206,7 @@ export function SkillListWithFiles({
   selected: SkillAsset | null;
   selectedFile: string | null;
   workspace: string;
+  canViewFiles: boolean;
   onSelectAsset: (asset: SkillAsset) => void;
   onSelectFile: (path: string | null) => void;
 }) {
@@ -211,6 +236,7 @@ export function SkillListWithFiles({
             selectedFile={selectedFile}
             isExpanded={expandedSkills.includes(asset.manifest.id)}
             workspace={workspace}
+            canViewFiles={canViewFiles}
             onSelectAsset={onSelectAsset}
             onToggleExpand={handleToggleExpand}
             onSelectFile={onSelectFile}
@@ -230,6 +256,7 @@ export function SkillListWithFiles({
           selectedFile={selectedFile}
           expandedSkills={expandedSkills}
           workspace={workspace}
+          canViewFiles={canViewFiles}
           onSelectAsset={onSelectAsset}
           onToggleExpand={handleToggleExpand}
           onSelectFile={onSelectFile}

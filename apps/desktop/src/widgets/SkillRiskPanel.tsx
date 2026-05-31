@@ -1,8 +1,13 @@
-import { Button } from "@heroui/react";
+import { Button, Spinner } from "@heroui/react";
+import { useMutation } from "@tanstack/react-query";
 import { AlertTriangle, ShieldCheck, Sparkles } from "lucide-react";
-import type { SkillManifest } from "../lib/teamai";
+import type { AiReviewResult, SkillManifest } from "../lib/teamai";
+import { reviewSkill } from "../lib/teamai";
 import { useLocale } from "../hooks/useLocale";
+import { useTheme } from "../hooks/useTheme";
 import { effectiveRisk, riskLabel } from "../utils/risk";
+import { formatError } from "../utils/format";
+import { Card } from "./Card";
 import { Pill, type PillTone } from "./Pill";
 
 interface RiskFinding {
@@ -20,24 +25,57 @@ const dangerousPermissions = new Set([
 
 const mediumPermissions = new Set(["shell.execute.limited"]);
 
+const verdictTone: Record<string, PillTone> = {
+  safe: "success",
+  caution: "warning",
+  danger: "danger",
+};
+
+const aiSeverityTone: Record<string, PillTone> = {
+  info: "default",
+  warning: "warning",
+  danger: "danger",
+};
+
 export function SkillRiskPanel({
   manifest,
   skillPath,
+  workspace,
+  refName,
 }: {
   manifest: SkillManifest;
   skillPath: string;
+  workspace: string;
+  refName?: string;
 }) {
   const { t } = useLocale();
+  const settings = useTheme();
   const risk = effectiveRisk(manifest);
   const findings = analyzeManifest(manifest, t);
 
   const dangerCount = findings.filter((f) => f.level === "danger").length;
   const warningCount = findings.filter((f) => f.level === "warning").length;
 
+  const aiConfigured = settings.aiProvider !== "none" && Boolean(settings.aiBaseUrl);
+
+  const review = useMutation<AiReviewResult, Error>({
+    mutationFn: () =>
+      reviewSkill({
+        provider: settings.aiProvider,
+        baseUrl: settings.aiBaseUrl,
+        model: settings.aiModel,
+        workspace,
+        skillPath,
+        refName,
+        skillName: manifest.name,
+        permissions: manifest.permissions,
+      }),
+  });
+
   return (
     <div className="space-y-4">
       {/* Headline */}
-      <div className="card p-4">
+      <Card className="p-4">
         <div className="flex items-center justify-between gap-3">
           <div>
             <div className="text-[10.5px] font-semibold uppercase tracking-wider text-[var(--fg-muted)]">
@@ -56,32 +94,65 @@ export function SkillRiskPanel({
             </div>
           </div>
         </div>
-      </div>
+      </Card>
 
-      {/* AI review (stub) */}
-      <div className="card p-4">
+      {/* AI review */}
+      <Card className="p-4">
         <div className="flex items-start justify-between gap-3">
-          <div>
+          <div className="min-w-0">
             <div className="flex items-center gap-2 text-[13px] font-semibold">
               <Sparkles size={14} className="text-[var(--brand)]" />
               {t("risk.aiReview")}
             </div>
             <p className="mt-1 text-[12px] text-[var(--fg-muted)]">
-              {t("risk.aiReviewDesc")}
+              {aiConfigured ? t("risk.aiReviewDesc") : t("risk.aiNotConfigured")}
             </p>
           </div>
-          <Button size="sm" variant="outline" isDisabled>
-            {t("risk.comingSoon")}
+          <Button
+            size="sm"
+            variant={aiConfigured ? "secondary" : "outline"}
+            isDisabled={!aiConfigured || review.isPending}
+            onPress={() => review.mutate()}
+          >
+            {review.isPending ? <Spinner size="sm" /> : null}
+            {review.isPending ? t("risk.aiReviewing") : t("risk.aiRunReview")}
           </Button>
         </div>
-      </div>
+
+        {review.error ? (
+          <div className="mt-3 rounded-md border border-[var(--danger)] bg-[var(--danger-soft)] px-3 py-2 text-[12px] text-[var(--danger)]">
+            {formatError(review.error)}
+          </div>
+        ) : null}
+
+        {review.data ? (
+          <div className="mt-3 space-y-2 border-t border-[var(--line)] pt-3">
+            <div className="flex items-center gap-2">
+              <Pill tone={verdictTone[review.data.verdict] ?? "default"}>
+                {t(`risk.verdict.${review.data.verdict}`)}
+              </Pill>
+              <span className="text-[12px] text-[var(--fg-secondary)]">{review.data.summary}</span>
+            </div>
+            {review.data.findings.length ? (
+              <div className="space-y-1.5">
+                {review.data.findings.map((f, i) => (
+                  <div key={i} className="flex items-start gap-2 text-[12px]">
+                    <Pill tone={aiSeverityTone[f.severity] ?? "default"}>{f.severity}</Pill>
+                    <span className="text-[var(--fg-secondary)]">{f.detail}</span>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </Card>
 
       {/* Static findings */}
-      <div className="card overflow-hidden">
-        <div className="card-header">
-          <div className="card-title">{t("risk.staticAnalysis")}</div>
+      <Card className="overflow-hidden p-0 gap-0">
+        <Card.Header>
+          <Card.Title>{t("risk.staticAnalysis")}</Card.Title>
           <Pill>{findings.length} {findings.length === 1 ? t("risk.finding") : t("risk.findings")}</Pill>
-        </div>
+        </Card.Header>
         {findings.length ? (
           <div className="divide-y divide-[var(--line)]">
             {findings.map((finding, i) => (
@@ -95,7 +166,7 @@ export function SkillRiskPanel({
             <div>{t("risk.noIssuesDesc")}</div>
           </div>
         )}
-      </div>
+      </Card>
     </div>
   );
 }

@@ -5,6 +5,7 @@ import {
   LogOut,
   Settings,
   Shield,
+  Sparkles,
   Trash2,
   User,
   Wifi,
@@ -12,13 +13,22 @@ import {
 import { type ReactNode, useEffect, useState } from "react";
 import { useLocale } from "../hooks/useLocale";
 import { notifySettingsChanged } from "../hooks/useTheme";
-import { dbCacheStats, dbClearCache, openDataDir, type CacheSizeInfo } from "../lib/teamai";
+import {
+  dbCacheStats,
+  dbClearCache,
+  deleteAiKey,
+  hasAiKey,
+  openDataDir,
+  saveAiKey,
+  type CacheSizeInfo,
+} from "../lib/teamai";
 
-type SettingsSection = "general" | "network" | "cache" | "account" | "about";
+type SettingsSection = "general" | "network" | "ai" | "cache" | "account" | "about";
 
 const sectionDefs: Array<{ id: SettingsSection; labelKey: string; icon: ReactNode }> = [
   { id: "general", labelKey: "settings.general", icon: <Settings size={15} /> },
   { id: "network", labelKey: "settings.network", icon: <Wifi size={15} /> },
+  { id: "ai", labelKey: "settings.ai", icon: <Sparkles size={15} /> },
   { id: "cache", labelKey: "settings.cache", icon: <Database size={15} /> },
   { id: "account", labelKey: "settings.account", icon: <User size={15} /> },
   { id: "about", labelKey: "settings.about", icon: <Shield size={15} /> },
@@ -31,6 +41,9 @@ export interface AppSettings {
   proxyMode: "none" | "system" | "custom";
   proxyUrl: string;
   requestTimeout: number;
+  aiProvider: "none" | "openai" | "anthropic";
+  aiBaseUrl: string;
+  aiModel: string;
 }
 
 const defaultSettings: AppSettings = {
@@ -40,6 +53,9 @@ const defaultSettings: AppSettings = {
   proxyMode: "none",
   proxyUrl: "",
   requestTimeout: 30,
+  aiProvider: "none",
+  aiBaseUrl: "",
+  aiModel: "",
 };
 
 function loadSettings(): AppSettings {
@@ -109,6 +125,8 @@ export function SettingsDialog({
                     <GeneralSection settings={settings} update={update} />
                   ) : section === "network" ? (
                     <NetworkSection settings={settings} update={update} />
+                  ) : section === "ai" ? (
+                    <AiSection settings={settings} update={update} />
                   ) : section === "cache" ? (
                     <CacheSection />
                   ) : section === "account" ? (
@@ -249,6 +267,134 @@ function NetworkSection({ settings, update }: { settings: AppSettings; update: <
           onChange={(v) => update("requestTimeout", Number(v))}
         />
       </SettingsRow>
+    </div>
+  );
+}
+
+const AI_PROVIDER_DEFAULTS: Record<string, { baseUrl: string; model: string }> = {
+  openai: { baseUrl: "https://api.openai.com/v1", model: "gpt-5.5" },
+  anthropic: { baseUrl: "https://api.anthropic.com/v1", model: "claude-opus-4-8" },
+};
+
+function AiSection({ settings, update }: { settings: AppSettings; update: <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => void }) {
+  const { t } = useLocale();
+  const [keyInput, setKeyInput] = useState("");
+  const [keyStored, setKeyStored] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    hasAiKey().then(setKeyStored).catch(() => setKeyStored(false));
+  }, []);
+
+  const onProviderChange = (provider: string) => {
+    update("aiProvider", provider as AppSettings["aiProvider"]);
+    // Prefill sensible defaults when switching to a provider and the fields are empty.
+    const defaults = AI_PROVIDER_DEFAULTS[provider];
+    if (defaults) {
+      if (!settings.aiBaseUrl) update("aiBaseUrl", defaults.baseUrl);
+      if (!settings.aiModel) update("aiModel", defaults.model);
+    }
+  };
+
+  const onSaveKey = async () => {
+    if (!keyInput.trim()) return;
+    setBusy(true);
+    try {
+      await saveAiKey(keyInput.trim());
+      setKeyStored(true);
+      setKeyInput("");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onClearKey = async () => {
+    setBusy(true);
+    try {
+      await deleteAiKey();
+      setKeyStored(false);
+      setKeyInput("");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const enabled = settings.aiProvider !== "none";
+
+  return (
+    <div className="space-y-0">
+      <h3 className="settings-section-title">{t("settings.ai")}</h3>
+      <p className="mb-3 text-[12px] text-[var(--fg-muted)]">{t("settings.ai.desc")}</p>
+
+      <SettingsRow label={t("settings.ai.provider")} description={t("settings.ai.provider.desc")}>
+        <SelectControl
+          value={settings.aiProvider}
+          options={[
+            { value: "none", label: t("settings.ai.provider.none") },
+            { value: "openai", label: "OpenAI" },
+            { value: "anthropic", label: "Anthropic" },
+          ]}
+          onChange={onProviderChange}
+        />
+      </SettingsRow>
+
+      {enabled ? (
+        <>
+          <SettingsRow label={t("settings.ai.baseUrl")} description={t("settings.ai.baseUrl.desc")}>
+            <Input
+              value={settings.aiBaseUrl}
+              onChange={(e) => update("aiBaseUrl", e.target.value)}
+              placeholder={AI_PROVIDER_DEFAULTS[settings.aiProvider]?.baseUrl ?? "https://…"}
+              variant="secondary"
+              className="w-[240px]"
+              aria-label="AI base URL"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+            />
+          </SettingsRow>
+
+          <SettingsRow label={t("settings.ai.model")} description={t("settings.ai.model.desc")}>
+            <Input
+              value={settings.aiModel}
+              onChange={(e) => update("aiModel", e.target.value)}
+              placeholder={AI_PROVIDER_DEFAULTS[settings.aiProvider]?.model ?? "model"}
+              variant="secondary"
+              className="w-[240px]"
+              aria-label="AI model"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+            />
+          </SettingsRow>
+
+          <SettingsRow label={t("settings.ai.apiKey")} description={keyStored ? t("settings.ai.apiKey.stored") : t("settings.ai.apiKey.desc")}>
+            <div className="flex items-center gap-2">
+              <Input
+                type="password"
+                value={keyInput}
+                onChange={(e) => setKeyInput(e.target.value)}
+                placeholder={keyStored ? "••••••••" : "sk-…"}
+                variant="secondary"
+                className="w-[180px]"
+                aria-label="AI API key"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+              />
+              {keyStored ? (
+                <Button size="sm" variant="outline" onPress={onClearKey} isPending={busy}>
+                  {t("settings.ai.apiKey.clear")}
+                </Button>
+              ) : (
+                <Button size="sm" variant="secondary" onPress={onSaveKey} isPending={busy} isDisabled={!keyInput.trim()}>
+                  {t("settings.ai.apiKey.save")}
+                </Button>
+              )}
+            </div>
+          </SettingsRow>
+        </>
+      ) : null}
     </div>
   );
 }

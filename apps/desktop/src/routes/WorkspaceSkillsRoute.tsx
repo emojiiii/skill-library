@@ -1,15 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSyncPoller } from "../hooks/useSyncPoller";
 import { useWindowFocus } from "../hooks/useWindowFocus";
 import { useLocalStorage } from "../hooks/useLocalStorage";
-import { getSkillsListCache, setSkillsListCache } from "../lib/workspaceCache";
+import { getSkillsListCache, setSkillsListCache, getSkillDetailFromCache, putSkillDetailInCache, clearSkillDetail } from "../lib/workspaceCache";
 import {
   getSkillDetail,
   getWorkspaceDetail,
   installSkill,
+  onScanProgress,
   previewPublish,
-  scanGithubWorkspace,
+  scanGithubWorkspaceStreaming,
   scanWorkspace,
   type SkillAsset,
   subscribeWorkspaceSkill,
@@ -56,8 +57,10 @@ export function WorkspaceSkillsRoute() {
   const [publishOpen, setPublishOpen] = useState(false);
   const [demoWorkspaceDetail, setDemoWorkspaceDetail] = useState<WorkspaceDetail | null>(null);
   const [cachedSkills, setCachedSkills] = useState<{ workspace: string; skills: SkillAsset[] }>({ workspace: "", skills: [] });
+  const [streamingSkills, setStreamingSkills] = useState<SkillAsset[]>([]);
   const prevAssetsRef = useRef<SkillAsset[]>([]);
   const initialLoadDone = useRef(false);
+  const unlistenRef = useRef<(() => void) | null>(null);
 
   // Simple setters that also persist
   const setSelected = (asset: SkillAsset | null) => {
@@ -70,25 +73,46 @@ export function WorkspaceSkillsRoute() {
     setPersistedFile(file);
   };
 
-  // --- Scan mutation ---
+  // --- Scan mutation (streaming) ---
   const scan = useMutation({
     mutationFn: async (request: ScanRequest) => {
-      if (request.kind === "local" && request.value.trim() === "demo") {
-        const detail = await getWorkspaceDetail({ workspace: request.value });
-        return { workspace: null, skills: await scanWorkspace("demo"), detail, fromCache: false };
+      // Reset streaming state and set up listener before starting scan
+      setStreamingSkills([]);
+      if (unlistenRef.current) {
+        unlistenRef.current();
+        unlistenRef.current = null;
       }
-      if (request.kind === "local") {
-        return { workspace: null, skills: await scanWorkspace(request.value), detail: null, fromCache: false };
-      }
+      // Register streaming listener
+      const unlisten = await onScanProgress((batch) => {
+        setStreamingSkills((prev) => [...prev, ...batch]);
+      });
+      unlistenRef.current = unlisten;
+
       try {
-        const detail = await getWorkspaceDetail({ workspace: request.value });
-        return { workspace: detail.workspace, skills: detail.skills, detail, fromCache: false };
-      } catch {
-        const fallback = await scanGithubWorkspace({ workspace: request.value });
-        return { workspace: fallback.workspace, skills: fallback.skills, detail: null, fromCache: false };
+        if (request.kind === "local" && request.value.trim() === "demo") {
+          const detail = await getWorkspaceDetail({ workspace: request.value });
+          return { workspace: null, skills: await scanWorkspace("demo"), detail, fromCache: false };
+        }
+        if (request.kind === "local") {
+          return { workspace: null, skills: await scanWorkspace(request.value), detail: null, fromCache: false };
+        }
+        try {
+          const detail = await getWorkspaceDetail({ workspace: request.value });
+          return { workspace: detail.workspace, skills: detail.skills, detail, fromCache: false };
+        } catch {
+          const fallback = await scanGithubWorkspaceStreaming({ workspace: request.value });
+          return { workspace: fallback.workspace, skills: fallback.skills, detail: null, fromCache: false };
+        }
+      } finally {
+        // Clean up listener when scan completes (success or error)
+        if (unlistenRef.current) {
+          unlistenRef.current();
+          unlistenRef.current = null;
+        }
       }
     },
     onSuccess: (result) => {
+      setStreamingSkills([]); // Clear streaming state, final result is authoritative
       setDemoWorkspaceDetail(result.workspace ? null : result.detail);
       // Restore persisted skill or fall back to first
       const restored = persistedSkillId
@@ -107,6 +131,16 @@ export function WorkspaceSkillsRoute() {
       }
     },
   });
+
+  // Clean up listener on unmount
+  useEffect(() => {
+    return () => {
+      if (unlistenRef.current) {
+        unlistenRef.current();
+        unlistenRef.current = null;
+      }
+    };
+  }, []);
 
   // --- Initial load ---
   if (!initialLoadDone.current) {
@@ -143,7 +177,24 @@ export function WorkspaceSkillsRoute() {
   // --- Skill detail ---
   const skillDetail = useQuery({
     queryKey: ["skill-detail", workspace, selected?.path, selectedRef],
-    queryFn: () => getSkillDetail({ workspace, skillPath: selected?.path ?? "", refName: selectedRef }),
+    queryFn: async () => {
+      const skillPath = selected?.path ?? "";
+      // Render instantly from cache, then refresh in the background.
+      const cached = await getSkillDetailFromCache<Awaited<ReturnType<typeof getSkillDetail>>>(
+        workspace,
+        skillPath,
+        selectedRef,
+      );
+      if (cached) {
+        void getSkillDetail({ workspace, skillPath, refName: selectedRef })
+          .then((fresh) => putSkillDetailInCache(workspace, skillPath, selectedRef, fresh))
+          .catch(() => undefined);
+        return cached;
+      }
+      const fresh = await getSkillDetail({ workspace, skillPath, refName: selectedRef });
+      await putSkillDetailInCache(workspace, skillPath, selectedRef, fresh);
+      return fresh;
+    },
     enabled: Boolean(workspaceMeta && selected?.path),
     staleTime: 2 * 60 * 1000,
   });
@@ -187,7 +238,12 @@ export function WorkspaceSkillsRoute() {
   // --- Derived: assets with filter ---
   const currentAssets = scan.data?.skills ?? [];
   if (currentAssets.length > 0) prevAssetsRef.current = currentAssets;
-  const assets = currentAssets.length > 0 ? currentAssets : (prevAssetsRef.current.length > 0 ? prevAssetsRef.current : (cachedSkills.workspace === workspace ? cachedSkills.skills : []));
+  // During streaming, show incrementally discovered skills; once scan completes, use final result
+  const assets = currentAssets.length > 0
+    ? currentAssets
+    : streamingSkills.length > 0
+      ? streamingSkills
+      : (prevAssetsRef.current.length > 0 ? prevAssetsRef.current : (cachedSkills.workspace === workspace ? cachedSkills.skills : []));
 
   const filteredAssets = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -217,6 +273,7 @@ export function WorkspaceSkillsRoute() {
         workspaceMeta={workspaceMeta}
         workspaceDetail={workspaceDetail}
         workspaceRef={workspace}
+        canViewFiles={Boolean(authLogin && workspaceMeta)}
         scanPending={scan.isPending}
         isRefreshing={scan.isPending && scan.data !== undefined}
         versions={workspaceDetail?.versions ?? []}
@@ -241,6 +298,8 @@ export function WorkspaceSkillsRoute() {
               onPublishClick={workspaceMeta ? () => setPublishOpen(true) : undefined}
               onSyncClick={workspaceMeta ? () => setSyncOpen(true) : undefined}
               onRefresh={() => {
+                // Drop the persistent detail cache so the refetch hits the network.
+                if (selected?.path) void clearSkillDetail(workspace, selected.path);
                 queryClient.invalidateQueries({ queryKey: ["skill-detail", workspace, selected?.path, selectedRef] });
                 queryClient.invalidateQueries({ queryKey: ["demo-skill-detail", selected?.path, selectedRef] });
                 queryClient.invalidateQueries({ queryKey: ["skill-file-content", workspace, selectedFile, selectedRef] });

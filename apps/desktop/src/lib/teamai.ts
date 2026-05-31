@@ -452,6 +452,23 @@ export async function scanGithubWorkspace(args: {
   return invoke("scan_github_workspace", args);
 }
 
+/** Streaming variant — emits `workspace-scan-progress` events as batches complete. */
+export async function scanGithubWorkspaceStreaming(args: {
+  workspace: string;
+  token?: string;
+}): Promise<WorkspaceSkillScan> {
+  if (!isTauri) return desktopOnly("Scan GitHub workspace");
+  return invoke("scan_github_workspace_streaming", args);
+}
+
+/** Listen for incremental scan progress events. */
+export async function onScanProgress(
+  handler: (skills: SkillAsset[]) => void,
+): Promise<() => void> {
+  if (!isTauri) return () => undefined;
+  return listen<SkillAsset[]>("workspace-scan-progress", (event) => handler(event.payload));
+}
+
 export async function getWorkspaceDetail(args: {
   workspace: string;
   token?: string;
@@ -733,6 +750,28 @@ export async function subscribeWorkspaceSkill(args: {
 }): Promise<SubscriptionsFile> {
   if (!isTauri) return desktopOnly("Subscribe");
   return invoke("subscribe_workspace_skill", args);
+}
+
+export interface SyncItemReport {
+  asset_id: string;
+  version?: string | null;
+  error?: string | null;
+}
+
+export interface SyncReport {
+  synced_at: string;
+  items: SyncItemReport[];
+}
+
+/**
+ * Download + install all subscribed skills (GitHub archive → extract → install
+ * → pin lockfile). This is the real remote-install path; `installSkill` only
+ * handles local directories. Pass allowRisky=true to install medium+-risk
+ * skills the user has already confirmed.
+ */
+export async function syncNow(allowRisky = false): Promise<SyncReport> {
+  if (!isTauri) return desktopOnly("Sync skills");
+  return invoke("sync_now", { allowRisky });
 }
 
 export async function installSkill(
@@ -1088,4 +1127,57 @@ export async function listSkillCommits(args: {
 }): Promise<SkillCommit[]> {
   if (!isTauri) return [];
   return invoke("list_skill_commits", args);
+}
+
+// ---------------------------------------------------------------------------
+// AI risk review
+// ---------------------------------------------------------------------------
+
+export interface AiReviewFinding {
+  severity: "info" | "warning" | "danger";
+  detail: string;
+}
+
+export interface AiReviewResult {
+  verdict: "safe" | "caution" | "danger";
+  summary: string;
+  findings: AiReviewFinding[];
+}
+
+export interface AiReviewRequest {
+  provider: string;
+  baseUrl: string;
+  model: string;
+  /** Workspace ref ("owner/repo") — backend downloads the skill from here. */
+  workspace: string;
+  /** In-repo skill directory path. */
+  skillPath: string;
+  /** Optional git ref (branch/tag/sha); defaults to the repo's default branch. */
+  refName?: string;
+  skillName: string;
+  permissions?: string[];
+}
+
+/** Store the AI provider API key in the OS keychain. */
+export async function saveAiKey(key: string): Promise<void> {
+  if (!isTauri) return desktopOnly("Save AI key");
+  return invoke("save_ai_key", { key });
+}
+
+/** Remove the stored AI provider API key. */
+export async function deleteAiKey(): Promise<void> {
+  if (!isTauri) return desktopOnly("Delete AI key");
+  return invoke("delete_ai_key");
+}
+
+/** Whether an AI API key is currently stored (never returns the key itself). */
+export async function hasAiKey(): Promise<boolean> {
+  if (!isTauri) return false;
+  return invoke("has_ai_key");
+}
+
+/** Run an AI safety review of a skill's entire source tree against the configured provider. */
+export async function reviewSkill(request: AiReviewRequest): Promise<AiReviewResult> {
+  if (!isTauri) return desktopOnly("AI review");
+  return invoke("review_skill", { request });
 }

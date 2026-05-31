@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { Card } from "./Card";
 
 export function ManagementTable({
   title,
@@ -20,14 +21,14 @@ export function ManagementTable({
   actions?: ReactNode;
 }) {
   return (
-    <div className="card overflow-hidden">
-      <div className="card-header">
+    <Card className="overflow-hidden p-0 gap-0">
+      <Card.Header>
         <div className="min-w-0">
-          <div className="card-title">{title}</div>
-          {subtitle ? <div className="card-subtitle">{subtitle}</div> : null}
+          <Card.Title>{title}</Card.Title>
+          {subtitle ? <Card.Subtitle>{subtitle}</Card.Subtitle> : null}
         </div>
         {actions ? <div className="flex items-center gap-2">{actions}</div> : null}
-      </div>
+      </Card.Header>
       {error ? (
         <div className="border-b border-[var(--line)] bg-[#fcefe7]/60 px-4 py-2 text-xs text-[var(--status-danger)]">
           {error}
@@ -36,6 +37,6 @@ export function ManagementTable({
       <div className={`${maxHeightClassName} overflow-y-auto`}>
         {count ? children : <div className="empty-state">{empty}</div>}
       </div>
-    </div>
+    </Card>
   );
 }

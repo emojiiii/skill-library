@@ -74,11 +74,12 @@ pub fn install(options: InstallOptions) -> Result<InstallReport> {
         .manifest
         .ok_or_else(|| InstallerError::InvalidSource(format!("{:?}", parse_result.errors)))?;
     let target_roots = TargetRoots::new(options.target_roots);
-    let requested = if options.targets.is_empty() {
-        manifest.targets.clone()
-    } else {
-        options.targets.clone()
-    };
+    // An explicit empty target list means "download/stage only, deploy nowhere"
+    // — the caller wants the skill source resolved but not linked into any agent
+    // directory. We therefore install to exactly the requested targets, with no
+    // "empty means all" fallback. (Callers that want every declared target pass
+    // them explicitly.)
+    let requested = options.targets.clone();
 
     let mut installed = Vec::new();
     let mut skipped = Vec::new();
@@ -357,6 +358,43 @@ targets:
             .path()
             .join("code-reviewer/.teamai-install.json")
             .exists());
+    }
+
+    #[test]
+    fn empty_targets_deploys_nowhere() {
+        // An explicit empty target list means "download/stage only" — nothing
+        // should be linked into any agent directory (no "empty means all").
+        let source = tempfile::tempdir().unwrap();
+        fs::write(
+            source.path().join("manifest.yaml"),
+            r#"
+id: code-reviewer
+type: skill
+name: Code Reviewer
+description: Reviews code changes for correctness.
+version: 1.0.0
+targets:
+  - claude-code
+"#,
+        )
+        .unwrap();
+        fs::write(source.path().join("SKILL.md"), "# Code Reviewer\n").unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let report = install(InstallOptions {
+            source_dir: source.path().to_path_buf(),
+            targets: Vec::new(),
+            target_roots: vec![TargetRoot {
+                target: "claude-code".to_owned(),
+                root: target.path().to_path_buf(),
+            }],
+        })
+        .unwrap();
+
+        assert!(report.installed.is_empty(), "nothing should be deployed");
+        assert!(
+            !target.path().join("code-reviewer").exists(),
+            "no skill dir should be created in any target root"
+        );
     }
 
     #[test]

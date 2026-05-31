@@ -10,6 +10,7 @@ import {
 } from "../lib/teamai";
 import { formatRelativeTime } from "../utils/format";
 import { openExternalUrl } from "../utils/format";
+import { Card } from "../widgets/Card";
 import { MetricTile } from "../widgets/MetricTile";
 import { Pill } from "../widgets/Pill";
 import { SegmentedTabs } from "../widgets/SegmentedTabs";
@@ -56,11 +57,11 @@ export function PublishPage({ workspaceRef }: { workspaceRef: string }) {
           <MetricTile label={t("publishPage.drafts")} value={drafts} tone={drafts ? "default" : "default"} />
         </div>
 
-        <div className="card overflow-hidden">
-          <div className="card-header">
+        <Card className="overflow-hidden p-0 gap-0">
+          <Card.Header>
             <div>
-              <div className="card-title">{t("publishPage.pullRequests")}</div>
-              <div className="card-subtitle truncate font-mono">{workspaceRef}</div>
+              <Card.Title>{t("publishPage.pullRequests")}</Card.Title>
+              <Card.Subtitle className="truncate font-mono">{workspaceRef}</Card.Subtitle>
             </div>
             <div className="flex items-center gap-2">
               <SegmentedTabs<PullRequestQueryState>
@@ -78,7 +79,7 @@ export function PublishPage({ workspaceRef }: { workspaceRef: string }) {
                 <RefreshCw size={13} />
               </Button>
             </div>
-          </div>
+          </Card.Header>
 
           {query.error ? (
             <div className="border-b border-[var(--line)] bg-[var(--danger-soft)] px-4 py-2 text-[12px] text-[var(--danger)]">
@@ -103,7 +104,7 @@ export function PublishPage({ workspaceRef }: { workspaceRef: string }) {
               <div>{t("publishPage.useSyncHint")}</div>
             </div>
           )}
-        </div>
+        </Card>
       </div>
     </section>
   );

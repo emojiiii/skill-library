@@ -172,21 +172,30 @@ export function SkillDetail({
 
   // Track local dirty state (editor content vs original cached content)
   const [editedContent, setEditedContent] = useState<string | null>(null);
+  // For markdown files, MDXEditor re-serializes on mount so we can't compare its
+  // output against the original text — the editor reports dirty against its own
+  // normalized baseline instead.
+  const [markdownDirty, setMarkdownDirty] = useState(false);
   const [showRevertConfirm, setShowRevertConfirm] = useState(false);
 
   // Reset edited content when skill or file changes
   useEffect(() => {
     setEditedContent(null);
+    setMarkdownDirty(false);
   }, [asset.manifest.id, selectedFile]);
 
-  // Dirty = user has edited and content differs from original
-  // Note: MDXEditor normalizes whitespace on mount, so we trim both sides to avoid false positives
+  // Dirty depends on the editor: markdown uses the editor's own baseline signal
+  // (MDXEditor normalizes content, so a text compare gives false positives);
+  // code/plain files are WYSIWYG so an exact compare against the original works.
   const hasUnpublishedChanges =
-    editedContent !== null && editedContent.trim() !== sourceContent.trim();
+    viewMode === "markdown-preview"
+      ? markdownDirty
+      : editedContent !== null && editedContent !== sourceContent;
 
   // Revert handler: reset editor content to original
   const handleRevert = useCallback(() => {
     setEditedContent(null);
+    setMarkdownDirty(false);
     setShowRevertConfirm(false);
   }, []);
 
@@ -236,6 +245,7 @@ export function SkillDetail({
             viewMode={viewMode}
             loading={sourceLoading}
             onChange={setEditedContent}
+            onDirtyChange={setMarkdownDirty}
           />
         </div>
       </div>
@@ -406,6 +416,7 @@ export function SkillDetail({
                   viewMode={viewMode}
                   loading={sourceLoading}
                   onChange={setEditedContent}
+                  onDirtyChange={setMarkdownDirty}
                 />
               </div>
             </div>
@@ -489,7 +500,7 @@ export function SkillDetail({
 
           {tab === "risk" ? (
             <div className="px-5 py-4">
-              <SkillRiskPanel manifest={activeAsset.manifest} skillPath={activeAsset.path} />
+              <SkillRiskPanel manifest={activeAsset.manifest} skillPath={activeAsset.path} workspace={workspaceRef} refName={selectedRef} />
             </div>
           ) : null}
         </div>
@@ -505,12 +516,14 @@ function SourceViewer({
   viewMode,
   loading,
   onChange,
+  onDirtyChange,
 }: {
   content: string;
   fileName: string;
   viewMode: FileViewMode;
   loading: boolean;
   onChange?: (value: string) => void;
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const { t } = useLocale();
   if (loading) {
@@ -525,7 +538,7 @@ function SourceViewer({
     case "markdown-preview":
       return (
         <div className="h-full">
-          <MarkdownEditor initialValue={content} onChange={onChange} />
+          <MarkdownEditor initialValue={content} onChange={onChange} onDirtyChange={onDirtyChange} />
         </div>
       );
 

@@ -7,6 +7,9 @@ pub type Result<T> = std::result::Result<T, TeamAIError>;
 #[cfg(test)]
 static TEST_GITHUB_TOKEN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
+#[cfg(test)]
+static TEST_AI_KEY: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 #[derive(Debug, thiserror::Error)]
 pub enum TeamAIError {
     #[error("{0}")]
@@ -281,6 +284,67 @@ pub fn delete_github_token() -> Result<()> {
     #[cfg(not(test))]
     {
         let entry = github_credential_entry()?;
+        match entry.delete_credential() {
+            Ok(()) => Ok(()),
+            Err(keyring::Error::NoEntry) => Ok(()),
+            Err(err) => Err(TeamAIError::Keychain(err.to_string())),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AI review provider API key — stored in the OS keychain, same mechanism as the
+// GitHub token (never written to disk in plaintext).
+// ---------------------------------------------------------------------------
+
+fn ai_credential_entry() -> std::result::Result<keyring::Entry, TeamAIError> {
+    keyring::Entry::new(keychain_service(), "ai-review")
+        .map_err(|err| TeamAIError::Keychain(err.to_string()))
+}
+
+pub fn read_ai_key() -> Result<Option<String>> {
+    #[cfg(test)]
+    {
+        Ok(TEST_AI_KEY.lock().unwrap().clone())
+    }
+
+    #[cfg(not(test))]
+    {
+        let entry = ai_credential_entry()?;
+        match entry.get_password() {
+            Ok(value) => Ok(Some(value)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(err) => Err(TeamAIError::Keychain(err.to_string())),
+        }
+    }
+}
+
+pub fn write_ai_key(key: &str) -> Result<()> {
+    #[cfg(test)]
+    {
+        *TEST_AI_KEY.lock().unwrap() = Some(key.to_owned());
+        Ok(())
+    }
+
+    #[cfg(not(test))]
+    {
+        let entry = ai_credential_entry()?;
+        entry
+            .set_password(key)
+            .map_err(|err| TeamAIError::Keychain(err.to_string()))
+    }
+}
+
+pub fn delete_ai_key() -> Result<()> {
+    #[cfg(test)]
+    {
+        *TEST_AI_KEY.lock().unwrap() = None;
+        Ok(())
+    }
+
+    #[cfg(not(test))]
+    {
+        let entry = ai_credential_entry()?;
         match entry.delete_credential() {
             Ok(()) => Ok(()),
             Err(keyring::Error::NoEntry) => Ok(()),

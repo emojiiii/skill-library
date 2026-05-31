@@ -4,13 +4,14 @@ import { formatError } from "./utils/format";
 
 describe("desktop routed management pages", () => {
   it("maps routed URLs to the correct workbench page", () => {
-    expect(routeToPage("/")).toBe("workspaces");
-    expect(routeToPage("/workspace/acme/team-skills")).toBe("workspaces");
-    expect(routeToPage("/workspace/acme/team-skills/publish")).toBe("publish");
-    expect(routeToPage("/workspace/acme/team-skills/invitations")).toBe("invitations");
-    expect(routeToPage("/workspace/acme/team-skills/activity")).toBe("activity");
+    expect(routeToPage("/")).toBe("discover");
+    expect(routeToPage("/skills")).toBe("workspaces");
+    expect(routeToPage("/publish")).toBe("publish");
+    expect(routeToPage("/members")).toBe("invitations");
+    expect(routeToPage("/activity")).toBe("activity");
+    expect(routeToPage("/discover")).toBe("discover");
+    expect(routeToPage("/my-skills")).toBe("mySkills");
     expect(routeToPage("/subscriptions")).toBe("subscriptions");
-    expect(routeToPage("/installed")).toBe("installed");
     expect(routeToPage("/cli")).toBe("cli");
   });
 
@@ -29,7 +30,7 @@ describe("desktop routed management pages", () => {
     expect(pages).toContain("invitations");
     expect(pages).toContain("activity");
     expect(pages).toContain("subscriptions");
-    expect(pages).toContain("installed");
+    expect(pages).toContain("mySkills");
     expect(pages).toContain("cli");
   });
 

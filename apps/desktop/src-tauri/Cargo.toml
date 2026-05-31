@@ -15,6 +15,8 @@ tauri-build = { version = "2", features = [] }
 base64.workspace = true
 chrono.workspace = true
 dirs.workspace = true
+dotenvy.workspace = true
+reqwest.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -36,3 +38,4 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 tokio.workspace = true
+genai = "0.6.3"

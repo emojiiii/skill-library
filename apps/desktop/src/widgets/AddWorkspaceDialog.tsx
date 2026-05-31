@@ -1,4 +1,4 @@
-import { Button, Input, Modal } from "@heroui/react";
+import { Button, Input, Modal, Spinner } from "@heroui/react";
 import { Plus, Search } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { Workspace } from "../lib/teamai";
@@ -126,9 +126,18 @@ export function AddWorkspaceDialog({
                       placeholder="acme/team-skills, ~/code/skills, or demo"
                       variant="secondary"
                     />
-                    <Button onPress={onAddManual} isPending={manualPending} isDisabled={!manualPath.trim()}>
-                      <Plus size={14} />
-                      Add
+                    <Button onPress={onAddManual} isDisabled={!manualPath.trim() || manualPending}>
+                      {manualPending ? (
+                        <>
+                          <Spinner size="sm" />
+                          Adding…
+                        </>
+                      ) : (
+                        <>
+                          <Plus size={14} />
+                          Add
+                        </>
+                      )}
                     </Button>
                   </div>
                 </div>
@@ -196,9 +205,18 @@ function RemoteRow({
         </div>
       </div>
       {workspace.permission === "read" ? <Pill tone="warning">read-only</Pill> : null}
-      <Button size="sm" variant="secondary" onPress={onAdd} isPending={adding}>
-        <Plus size={13} />
-        Add
+      <Button size="sm" variant="secondary" onPress={onAdd} isDisabled={adding}>
+        {adding ? (
+          <>
+            <Spinner size="sm" />
+            Adding…
+          </>
+        ) : (
+          <>
+            <Plus size={13} />
+            Add
+          </>
+        )}
       </Button>
     </div>
   );

@@ -78,7 +78,7 @@ export function WorkspacesPage({
         onExpand={() => setLeftCollapsed(false)}
       >
         <section className="flex h-full min-w-0 min-h-0 flex-col">
-          <div className="flex items-center justify-between gap-3 border-b border-[var(--line)] bg-[var(--bg-elevated)] px-5 py-3">
+          <div className="flex items-center justify-between gap-3 px-5 pt-4 pb-3">
             <div className="min-w-0 flex-1">
               <div className="truncate text-[13.5px] font-semibold tracking-tight text-[var(--fg)]">
                 {workspaceMeta ? workspaceMeta.full_name : t("workspaces.localWorkspace")}
@@ -134,14 +134,14 @@ export function WorkspacesPage({
             </div>
           </div>
 
-          <div className="px-5 pt-3 pb-2">
+          <div className="px-5 pt-2 pb-2">
             <div className="relative">
               <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--fg-muted)]" />
               <input
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder={t("workspaces.filterSkills")}
-                className="w-full rounded-md border border-[var(--line)] bg-[var(--bg-elevated)] py-2 pl-8 pr-3 text-[13px] outline-none focus:border-[var(--brand)] focus:ring-2 focus:ring-[var(--brand-soft)]"
+                className="w-full rounded-md border-0 bg-[var(--bg-soft)] py-2 pl-8 pr-3 text-[13px] outline-none focus:ring-2 focus:ring-[var(--brand-soft)]"
               />
             </div>
             <div className="mt-2 flex items-center justify-between text-[11px] text-[var(--fg-muted)]">

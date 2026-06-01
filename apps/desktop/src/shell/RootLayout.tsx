@@ -1,5 +1,6 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useState } from "react";
 import { useLocale } from "../hooks/useLocale";
 import { useTheme } from "../hooks/useTheme";
@@ -28,13 +29,12 @@ import {
 } from "../lib/teamai";
 import { LoginScreen } from "./LoginScreen";
 import { Sidebar } from "./Sidebar";
-import { Topbar } from "./Topbar";
 import { AuthDialog } from "./AuthDialog";
 import { SettingsDialog } from "./SettingsDialog";
 import { AddWorkspaceDialog } from "../widgets/AddWorkspaceDialog";
 import { PushModal } from "../widgets/PushModal";
 import { formatError, openExternalUrl } from "../utils/format";
-import { type AppPage, routeToPage } from "../utils/navigation";
+import { type AppPage } from "../utils/navigation";
 import { useAppStore } from "../state/appStore";
 
 /**
@@ -75,7 +75,6 @@ export function RootLayout() {
 
   // --- Route-derived ---
   const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const currentPage = routeToPage(pathname);
 
   // The active workspace is a global selection (store), not part of the URL.
   // This is the single source of truth — selecting a workspace sets it, and it
@@ -274,13 +273,6 @@ export function RootLayout() {
   // --- Derived ---
   const isAuthenticated = Boolean(auth.data?.githubLogin);
 
-  const refreshControlPlane = () => {
-    workspaces.refetch();
-    localAgents.refetch();
-    subscriptions.refetch();
-  };
-  const controlPlanePending = workspaces.isFetching || localAgents.isFetching || subscriptions.isFetching;
-
   const globalError =
     (addRemoteWorkspace.error ? formatError(addRemoteWorkspace.error) : null) ??
     (addManualWorkspace.error ? formatError(addManualWorkspace.error) : null) ??
@@ -299,6 +291,24 @@ export function RootLayout() {
       setAuthDialogOpen(true);
     }
   }, [authIntent, isAuthenticated]);
+
+  // --- Window drag handler ---
+  // Allow dragging the window from the top ~40px of the main area,
+  // but only when clicking on empty space (not interactive elements).
+  const handleDragMouseDown = (e: React.MouseEvent) => {
+    // Only trigger in the top titlebar region
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const y = e.clientY - rect.top;
+    if (y > 40) return;
+
+    // Don't interfere with interactive elements
+    const target = e.target as HTMLElement;
+    const interactive = target.closest("button, a, input, select, textarea, [role='button'], [data-no-drag]");
+    if (interactive) return;
+
+    e.preventDefault();
+    getCurrentWindow().startDragging();
+  };
 
   // --- Loading state ---
   if (auth.isLoading) {
@@ -344,13 +354,8 @@ export function RootLayout() {
         }
       />
 
-      <main className="app-shell__main">
-        <Topbar
-          page={currentPage}
-          onRefresh={refreshControlPlane}
-          refreshing={controlPlanePending}
-        />
-
+      <main className="app-shell__main" onMouseDown={handleDragMouseDown}>
+        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
         {deepLink ? (
           <div className="banner banner--accent">
             <div className="min-w-0">
@@ -394,6 +399,7 @@ export function RootLayout() {
 
         <div className="flex min-h-0 flex-1 flex-col">
           <Outlet />
+        </div>
         </div>
       </main>
 

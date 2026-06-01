@@ -77,6 +77,9 @@ export function Sidebar({
 
   return (
     <aside className={`app-shell__sidebar ${collapsed ? "is-collapsed" : ""}`}>
+      {/* Traffic light spacer for macOS overlay titlebar — draggable */}
+      <div className="sidebar-traffic-light-spacer" data-tauri-drag-region />
+
       {/* Workspace picker is a creator-layer concept; anonymous users see a brand header instead. */}
       {isCreatorMode ? (
         !collapsed ? (

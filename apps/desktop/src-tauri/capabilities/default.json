@@ -3,5 +3,10 @@
   "identifier": "default",
   "description": "Default desktop capability for Team AI Hub",
   "windows": ["main"],
-  "permissions": ["core:default", "deep-link:allow-get-current", "opener:default"]
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "deep-link:allow-get-current",
+    "opener:default"
+  ]
 }

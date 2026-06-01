@@ -1,10 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
-import { GitBranch, Search } from "lucide-react";
-import { Drawer } from "@heroui/react";
+import { GitBranch, Search, ShieldCheck } from "lucide-react";
+import { Modal } from "@heroui/react";
 import type { ReactNode } from "react";
 import { useLocale } from "../hooks/useLocale";
 import type { SkillAsset, SkillVersion, Workspace, WorkspaceDetail } from "../lib/teamai";
 import { listWorkspaceBranches } from "../lib/teamai";
+import type { ReviewVerdictMap } from "../lib/review";
 import { Pill } from "../widgets/Pill";
 
 export function WorkspacesPage({
@@ -28,6 +29,7 @@ export function WorkspacesPage({
   versions,
   selectedBranch,
   onSelectBranch,
+  reviewVerdicts,
 }: {
   filteredAssets: SkillAsset[];
   selected: SkillAsset | null;
@@ -49,6 +51,7 @@ export function WorkspacesPage({
   versions: SkillVersion[];
   selectedBranch: string | undefined;
   onSelectBranch: (branch: string | undefined) => void;
+  reviewVerdicts?: ReviewVerdictMap;
 }) {
   const { t } = useLocale();
   const branches = useQuery({
@@ -149,6 +152,7 @@ export function WorkspacesPage({
                     key={asset.manifest.id}
                     asset={asset}
                     selected={selected?.manifest.id === asset.manifest.id}
+                    verdict={reviewVerdicts?.[asset.manifest.id]}
                     onSelect={() => {
                       onSelectAsset(asset);
                       onSelectRef(undefined);
@@ -168,16 +172,23 @@ export function WorkspacesPage({
         </div>
       </section>
 
-      {/* Detail drawer */}
-      <Drawer isOpen={detailOpen} onOpenChange={onDetailOpenChange}>
-        <Drawer.Backdrop>
-          <Drawer.Content placement="right">
-            <Drawer.Dialog className="flex h-full w-[min(560px,92vw)] flex-col bg-[var(--bg-elevated)] outline-none">
+      {/* Detail modal */}
+      <Modal isOpen={detailOpen} onOpenChange={onDetailOpenChange}>
+        <Modal.Backdrop>
+          <Modal.Container>
+            {/* Dimensions go through inline style: HeroUI's size variants apply a
+                custom `.modal__dialog--*` class (= `max-w-*`) that tailwind-merge
+                can't override from className, so a `w-[...]` utility gets capped.
+                Inline style wins on specificity. */}
+            <Modal.Dialog
+              className="flex flex-col rounded-[14px] bg-[var(--bg-elevated)] outline-none"
+              style={{ width: "min(1040px, 94vw)", maxWidth: "min(1040px, 94vw)", height: "min(760px, 88vh)" }}
+            >
               {detailPanel}
-            </Drawer.Dialog>
-          </Drawer.Content>
-        </Drawer.Backdrop>
-      </Drawer>
+            </Modal.Dialog>
+          </Modal.Container>
+        </Modal.Backdrop>
+      </Modal>
     </div>
   );
 }
@@ -187,11 +198,14 @@ function SkillCard({
   asset,
   selected,
   onSelect,
+  verdict,
 }: {
   asset: SkillAsset;
   selected: boolean;
   onSelect: () => void;
+  verdict?: string;
 }) {
+  const { t } = useLocale();
   return (
     <div
       role="button"
@@ -209,6 +223,16 @@ function SkillCard({
           : "border-[var(--line)] bg-[var(--bg-elevated)] hover:border-[var(--brand)]/50 hover:bg-[var(--bg-soft)]"
       }`}
     >
+      {/* Reviewed-safe badge — tilted green shield in the top-left corner */}
+      {verdict === "safe" ? (
+        <span
+          className="absolute -left-1.5 -top-1.5 z-10 flex size-6 items-center justify-center rounded-full bg-[var(--success)] text-white shadow-sm"
+          style={{ transform: "rotate(-12deg)" }}
+          title={t("risk.safeBadge")}
+        >
+          <ShieldCheck size={13} strokeWidth={2.5} />
+        </span>
+      ) : null}
       <div className="flex items-start justify-between gap-2">
         <span className="truncate text-[14px] font-semibold tracking-tight text-[var(--fg)]">
           {asset.manifest.name}

@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { Download } from "lucide-react";
-import { Button, toast } from "@heroui/react";
+import { Button, Spinner, toast } from "@heroui/react";
 import {
   FEATURED_SKILLS,
   parseSource,
@@ -20,8 +20,9 @@ import { getSkillDetailFromCache, putSkillDetailInCache } from "../lib/workspace
 import { formatError } from "../utils/format";
 import { DiscoverPage } from "../pages/DiscoverPage";
 import { SkillSafetyCard } from "../widgets/SkillSafetyCard";
-import { MarkdownPreview } from "../widgets/MarkdownPreview";
 import { InstallToToolsDialog } from "../widgets/InstallToToolsDialog";
+
+const MarkdownPreview = lazy(() => import("../widgets/MarkdownPreview").then((m) => ({ default: m.MarkdownPreview })));
 
 /** Debounce a changing value by `delay` ms. */
 function useDebounced<T>(value: T, delay: number): T {
@@ -196,7 +197,15 @@ export function DiscoverRoute() {
             </div>
           ) : skillMarkdown ? (
             <div className="space-y-4">
-              <MarkdownPreview content={skillMarkdown} compact />
+              <Suspense
+                fallback={
+                  <div className="flex justify-center py-8 text-[12px] text-[var(--fg-muted)]">
+                    <Spinner size="sm" />
+                  </div>
+                }
+              >
+                <MarkdownPreview content={skillMarkdown} compact />
+              </Suspense>
               {/* Safety card collapsed by default */}
               {manifest ? (
                 <details className="group">

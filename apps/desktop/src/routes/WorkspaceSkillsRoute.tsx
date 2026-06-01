@@ -1,11 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Spinner } from "@heroui/react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useSyncPoller } from "../hooks/useSyncPoller";
 import { useWindowFocus } from "../hooks/useWindowFocus";
 import { useLocalStorage } from "../hooks/useLocalStorage";
-import { getSkillsListCache, setSkillsListCache, getSkillDetailFromCache, putSkillDetailInCache, clearSkillDetail } from "../lib/workspaceCache";
+import { getSkillsListCache, setSkillsListCache, getSkillDetailFromCache, putSkillDetailInCache, clearSkillDetail, getReviewCache, getReviewCaches, putReviewCache } from "../lib/workspaceCache";
 import {
   getSkillDetail,
+  getRemoteReviewsBatch,
   getWorkspaceDetail,
   installSkill,
   onScanProgress,
@@ -18,13 +20,19 @@ import {
   type WorkspaceDetail,
   listWorkspaces,
 } from "../lib/teamai";
+import { normalizeRemoteReview, reviewVerdictMapKey, type ReviewVerdictMap } from "../lib/review";
 import { WorkspacesPage } from "../pages/WorkspacesPage";
 import { PublishModal } from "../widgets/PublishModal";
-import { SkillDetail } from "../widgets/SkillDetail";
 import { SubscribeModal, type Channel, type UpdatePolicy } from "../widgets/SubscribeModal";
 import { SyncSkillModal } from "../widgets/SyncSkillModal";
 import { useWorkspace } from "../context/WorkspaceContext";
 import { useAppStore } from "../state/appStore";
+
+// Lazy-loaded: SkillDetail pulls in the heavy editor stack (MDXEditor/ProseMirror
+// + CodeMirror with 10 language packs, ~2MB). Keeping it out of the startup
+// bundle is what stops the multi-second main-thread stall on first paint — the
+// editor chunk is only fetched when the detail modal is actually opened.
+const SkillDetail = lazy(() => import("../widgets/SkillDetail").then((m) => ({ default: m.SkillDetail })));
 
 type ScanRequest = { kind: "local" | "github"; value: string };
 
@@ -260,6 +268,100 @@ export function WorkspaceSkillsRoute() {
   const skillPaths = useMemo(() => assets.map((a) => a.path), [assets]);
   useSyncPoller({ workspace: workspace || null, skillPaths, focused: windowFocused, enabled: Boolean(workspace) });
 
+  // --- Review verdict map: SQLite first, remote refresh second ---
+  // The review for a skill is just a JSON file in the repo's `.reviews/` dir. We
+  // rebuild the badge map from SQLite immediately, then batch-fetch remote
+  // reviews silently to refresh that local cache in the background.
+  const reviewTargets = useMemo(
+    () => assets.map((asset) => ({ id: asset.manifest.id, path: asset.path })),
+    [assets],
+  );
+  const skillIds = useMemo(() => reviewTargets.map((target) => target.id), [reviewTargets]);
+  const skillIdsKey = useMemo(() => skillIds.join("\0"), [skillIds]);
+
+  useEffect(() => {
+    const key = reviewVerdictMapKey(workspace);
+    if (!workspace || !reviewTargets.length) {
+      queryClient.setQueryData(key, {});
+      return;
+    }
+
+    let cancelled = false;
+    void getReviewCaches(workspace, reviewTargets.map((target) => target.path))
+      .then((entries) => {
+        if (cancelled) return;
+        const localMap: ReviewVerdictMap = {};
+        reviewTargets.forEach((target, index) => {
+          const entry = entries[index];
+          if (!entry) return;
+          localMap[target.id] = entry.verdict;
+          queryClient.setQueryData(["review-cache", workspace, target.path], entry);
+        });
+        queryClient.setQueryData<ReviewVerdictMap>(key, (current) => {
+          const next: ReviewVerdictMap = {};
+          for (const target of reviewTargets) {
+            const verdict = localMap[target.id] ?? current?.[target.id];
+            if (verdict) next[target.id] = verdict;
+          }
+          return next;
+        });
+      })
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [workspace, reviewTargets, queryClient]);
+
+  useEffect(() => {
+    if (!workspace || !authLogin || !skillIds.length) return;
+    void queryClient.invalidateQueries({ queryKey: reviewVerdictMapKey(workspace) });
+  }, [workspace, authLogin, skillIds.length, skillIdsKey, queryClient]);
+
+  const verdictMapQuery = useQuery({
+    queryKey: reviewVerdictMapKey(workspace),
+    queryFn: async (): Promise<ReviewVerdictMap> => {
+      if (!skillIds.length) return {};
+      const currentMap = queryClient.getQueryData<ReviewVerdictMap>(reviewVerdictMapKey(workspace)) ?? {};
+      const map: ReviewVerdictMap = {};
+      for (const target of reviewTargets) {
+        const verdict = currentMap[target.id];
+        if (verdict) map[target.id] = verdict;
+      }
+      const rawResults = await getRemoteReviewsBatch({ workspace, skillIds });
+      await Promise.all(
+        skillIds.map(async (id, i) => {
+          const raw = rawResults[i];
+          const target = reviewTargets[i];
+          if (!raw || !target) return;
+          const remote = normalizeRemoteReview(raw);
+          if (!remote) return;
+          // Don't clobber a local review the user just ran but hasn't synced —
+          // that copy is newer than whatever is in the repo. Otherwise adopt the
+          // remote copy as the cached source of truth.
+          const local = await getReviewCache(workspace, target.path).catch(() => null);
+          if (local && !local.synced && local.contentHash !== remote.contentHash) {
+            map[id] = local.verdict;
+            queryClient.setQueryData(["review-cache", workspace, target.path], local);
+            return;
+          }
+          map[id] = remote.verdict;
+          await putReviewCache(workspace, target.path, remote);
+          // Seed the panel's exact query key so an open Risk tab updates live and
+          // a subsequent open is zero-pending.
+          queryClient.setQueryData(["review-cache", workspace, target.path], remote);
+        }),
+      );
+      return map;
+    },
+    enabled: Boolean(workspace && skillIds.length && authLogin),
+    staleTime: 5 * 60_000,
+    refetchInterval: 5 * 60_000,
+    refetchIntervalInBackground: false,
+    retry: false,
+  });
+  const reviewVerdicts = verdictMapQuery.data ?? {};
+
   return (
     <>
       <WorkspacesPage
@@ -290,8 +392,16 @@ export function WorkspaceSkillsRoute() {
           setDetailOpen(open);
           if (!open) setSelected(null);
         }}
+        reviewVerdicts={reviewVerdicts}
         detailPanel={
           selected ? (
+            <Suspense
+              fallback={
+                <div className="flex h-full items-center justify-center text-[12px] text-[var(--fg-muted)]">
+                  <Spinner size="sm" />
+                </div>
+              }
+            >
             <SkillDetail
               asset={selected}
               detail={selectedDetail.data}
@@ -321,6 +431,7 @@ export function WorkspaceSkillsRoute() {
               publishResult={publish.data}
               subscriptions={subscriptions.data?.subscriptions.length ?? 0}
             />
+            </Suspense>
           ) : null
         }
       />

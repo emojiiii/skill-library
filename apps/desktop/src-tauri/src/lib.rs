@@ -1584,6 +1584,28 @@ fn db_cache_get(app: tauri::AppHandle, key: String) -> CommandResult<Option<Stri
     }))
 }
 
+/// Get cache entries by key (returns base64-encoded data or null, index-aligned).
+#[tauri::command]
+fn db_cache_get_many(
+    app: tauri::AppHandle,
+    keys: Vec<String>,
+) -> CommandResult<Vec<Option<String>>> {
+    let database = app.state::<Mutex<db::Database>>();
+    let db_guard = database.lock().unwrap();
+    let entries = db_guard
+        .get_cache_many(&keys)
+        .map_err(|e| CommandError::coded("db_error", e.to_string()))?;
+    Ok(entries
+        .into_iter()
+        .map(|entry| {
+            entry.map(|bytes| {
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD.encode(&bytes)
+            })
+        })
+        .collect())
+}
+
 /// Put a cache entry (data is base64-encoded string from frontend).
 #[tauri::command]
 fn db_cache_put(app: tauri::AppHandle, key: String, workspace: String, data: String) -> CommandResult<()> {
@@ -3816,6 +3838,157 @@ fn saved_github_token(paths: &AppPaths) -> Option<String> {
 // sends a skill's SKILL.md to the configured LLM for a safety review.
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteReviewCommit {
+    path: String,
+    sha: String,
+}
+
+fn review_file_path(skill_id: &str) -> CommandResult<String> {
+    let cleaned = skill_id
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if cleaned.is_empty() {
+        return Err(CommandError::coded(
+            "invalid_skill_id",
+            "skill id is required for review sync",
+        ));
+    }
+    Ok(format!(".reviews/{cleaned}.json"))
+}
+
+#[tauri::command]
+async fn get_skill_content_hash(
+    workspace: String,
+    skill_path: String,
+    ref_name: Option<String>,
+) -> CommandResult<String> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let workspace = parse_workspace(&workspace)?;
+    let token = saved_github_token(&paths);
+    let prepared = teamai_sync::prepare_skill_for_review(
+        &paths,
+        &workspace,
+        &skill_path,
+        ref_name.as_deref(),
+        token.as_deref(),
+    )
+    .await
+    .map_err(|err| CommandError::coded("ai_download", err.to_string()))?;
+
+    ai_review::content_hash_for_dir(&prepared.skill_dir).map_err(map_review_error)
+}
+
+#[tauri::command]
+async fn get_remote_review(workspace: String, skill_id: String) -> CommandResult<Option<String>> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let token = saved_github_token(&paths);
+    let provider = github_provider(token.as_deref())?;
+    let workspace = parse_workspace(&workspace)?;
+    let ws_info = provider
+        .get_workspace(&workspace)
+        .await
+        .map_err(provider_command_error)?;
+    let path = review_file_path(&skill_id)?;
+
+    match provider
+        .read_file(&workspace, &GitRef::Branch(ws_info.default_branch), &path)
+        .await
+    {
+        Ok(blob) => {
+            let content = String::from_utf8(blob.bytes)
+                .map_err(|err| CommandError::coded("invalid_review_cache", err.to_string()))?;
+            Ok(Some(content))
+        }
+        Err(teamai_provider::ProviderError::NotFound { .. }) => Ok(None),
+        Err(err) => Err(provider_command_error(err)),
+    }
+}
+
+#[tauri::command]
+async fn commit_review_to_repo(
+    workspace: String,
+    skill_id: String,
+    review_json: String,
+) -> CommandResult<RemoteReviewCommit> {
+    serde_json::from_str::<serde_json::Value>(&review_json)
+        .map_err(|err| CommandError::coded("invalid_review_json", err.to_string()))?;
+
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let token = saved_github_token(&paths).ok_or_else(|| {
+        CommandError::coded(
+            "missing_github_token",
+            "log in with GitHub before syncing a review",
+        )
+    })?;
+    let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
+    let workspace = parse_workspace(&workspace)?;
+    let ws_info = provider
+        .get_workspace(&workspace)
+        .await
+        .map_err(provider_command_error)?;
+    let path = review_file_path(&skill_id)?;
+    let uploaded = provider
+        .put_file_content(
+            &workspace,
+            &ws_info.default_branch,
+            &path,
+            review_json.as_bytes(),
+            &format!("Update AI review for {skill_id}"),
+        )
+        .await
+        .map_err(provider_command_error)?;
+
+    Ok(RemoteReviewCommit {
+        path: uploaded.path,
+        sha: uploaded.sha,
+    })
+}
+
+/// Batch-fetch the remote review JSON for many skills in a single request. The
+/// returned vec is index-aligned with `skill_ids`; entries are `None` when the
+/// skill has no `.reviews/{id}.json` yet. Used to warm the local review cache on
+/// workspace load (and drive the "reviewed safe" badge) without one round-trip
+/// per skill.
+#[tauri::command]
+async fn get_remote_reviews_batch(
+    workspace: String,
+    skill_ids: Vec<String>,
+) -> CommandResult<Vec<Option<String>>> {
+    if skill_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let token = saved_github_token(&paths);
+    let provider = github_provider(token.as_deref())?;
+    let workspace = parse_workspace(&workspace)?;
+    let ws_info = provider
+        .get_workspace(&workspace)
+        .await
+        .map_err(provider_command_error)?;
+    let review_paths: Vec<String> = skill_ids
+        .iter()
+        .map(|id| review_file_path(id).unwrap_or_else(|_| ".reviews/__invalid__.json".to_string()))
+        .collect();
+    provider
+        .batch_fetch_text_files(&workspace, &ws_info.default_branch, &review_paths)
+        .await
+        .map_err(provider_command_error)
+}
+
 #[tauri::command]
 fn save_ai_key(key: String) -> CommandResult<()> {
     teamai_core::write_ai_key(&key)
@@ -4286,6 +4459,10 @@ pub fn run() {
             save_ai_key,
             delete_ai_key,
             has_ai_key,
+            get_skill_content_hash,
+            get_remote_review,
+            get_remote_reviews_batch,
+            commit_review_to_repo,
             review_skill,
             list_workspaces,
             scan_workspace,
@@ -4326,6 +4503,7 @@ pub fn run() {
             db_cache_stats,
             db_clear_cache,
             db_cache_get,
+            db_cache_get_many,
             db_cache_put,
             db_cache_delete,
             db_cache_delete_prefix,

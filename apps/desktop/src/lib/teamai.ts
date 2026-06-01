@@ -952,6 +952,12 @@ export async function dbCacheGet(key: string): Promise<string | null> {
   return invoke("db_cache_get", { key });
 }
 
+/** Get cache entries by key. Returned values are index-aligned with keys. */
+export async function dbCacheGetMany(keys: string[]): Promise<Array<string | null>> {
+  if (!isTauri) return keys.map(() => null);
+  return invoke("db_cache_get_many", { keys });
+}
+
 /** Put a cache entry. Data is base64-encoded JSON string. */
 export async function dbCachePut(key: string, workspace: string, data: string): Promise<void> {
   if (!isTauri) return;
@@ -1194,6 +1200,7 @@ export interface AiReviewResult {
   verdict: "safe" | "caution" | "danger";
   summary: string;
   findings: AiReviewFinding[];
+  contentHash: string;
 }
 
 export interface AiReviewRequest {
@@ -1234,6 +1241,54 @@ export async function hasAiKey(): Promise<boolean> {
 export async function reviewSkill(request: AiReviewRequest): Promise<AiReviewResult> {
   if (!isTauri) return desktopOnly("AI review");
   return invoke("review_skill", { request });
+}
+
+/** Compute the current skill content hash without running an AI review. */
+export async function getSkillContentHash(args: {
+  workspace: string;
+  skillPath: string;
+  refName?: string;
+}): Promise<string> {
+  if (!isTauri) return desktopOnly("Skill content hash");
+  return invoke("get_skill_content_hash", args);
+}
+
+/** Raw JSON content from `.reviews/{skillId}.json`, or null when absent. */
+export async function getRemoteReview(args: {
+  workspace: string;
+  skillId: string;
+}): Promise<string | null> {
+  if (!isTauri) return null;
+  return invoke("get_remote_review", args);
+}
+
+export interface RemoteReviewCommit {
+  path: string;
+  sha: string;
+}
+
+/** Commit a review JSON file to the workspace repo's `.reviews/` directory. */
+export async function commitReviewToRepo(args: {
+  workspace: string;
+  skillId: string;
+  reviewJson: string;
+}): Promise<RemoteReviewCommit> {
+  if (!isTauri) return desktopOnly("Sync AI review");
+  return invoke("commit_review_to_repo", args);
+}
+
+/**
+ * Batch-fetch remote review JSON for many skills in one request. The result is
+ * index-aligned with `skillIds`; entries are null when no remote review exists.
+ * Used to warm the local cache on workspace load and drive the "reviewed safe"
+ * badge in the skills list.
+ */
+export async function getRemoteReviewsBatch(args: {
+  workspace: string;
+  skillIds: string[];
+}): Promise<Array<string | null>> {
+  if (!isTauri) return args.skillIds.map(() => null);
+  return invoke("get_remote_reviews_batch", args);
 }
 
 /**

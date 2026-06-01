@@ -221,17 +221,19 @@ impl GitHubProvider {
         for i in 0..paths.len() {
             let alias = format!("f{i}");
             let entry = repo.get(&alias);
-            let text = entry
-                .and_then(|node| {
-                    if node.is_null() {
-                        return None;
-                    }
-                    let is_binary = node.get("isBinary").and_then(|v| v.as_bool()).unwrap_or(false);
-                    if is_binary {
-                        return None;
-                    }
-                    node.get("text").and_then(|v| v.as_str()).map(str::to_owned)
-                });
+            let text = entry.and_then(|node| {
+                if node.is_null() {
+                    return None;
+                }
+                let is_binary = node
+                    .get("isBinary")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if is_binary {
+                    return None;
+                }
+                node.get("text").and_then(|v| v.as_str()).map(str::to_owned)
+            });
             out.push(text);
         }
         Ok(out)
@@ -376,6 +378,7 @@ impl GitHubProvider {
                         message: input.commit_message.clone(),
                         content,
                         branch: input.branch_name.clone(),
+                        sha: None,
                     },
                 )
                 .await?;
@@ -401,6 +404,46 @@ impl GitHubProvider {
         Ok(GitHubPublishResult {
             pull_request: pr.into(),
             uploaded,
+        })
+    }
+
+    /// Create or update a file directly on an existing branch with a single
+    /// commit. This is intentionally narrower than `publish_files_pull_request`
+    /// for small shared metadata files such as `.reviews/{skill}.json`.
+    pub async fn put_file_content(
+        &self,
+        reference: &WorkspaceRef,
+        branch: &str,
+        path: &str,
+        bytes: &[u8],
+        message: &str,
+    ) -> Result<GitHubUploadedFile> {
+        validate_repo_path(path)?;
+        let git_ref = GitRef::Branch(branch.to_owned());
+        let existing_sha = match self.read_file(reference, &git_ref, path).await {
+            Ok(blob) => Some(blob.sha),
+            Err(ProviderError::NotFound { .. }) => None,
+            Err(err) => return Err(err),
+        };
+        let content = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let response: PutContentResponse = self
+            .put_json(
+                &format!(
+                    "/repos/{}/{}/contents/{}",
+                    reference.owner, reference.repo, path
+                ),
+                &PutContentRequest {
+                    message: message.to_owned(),
+                    content,
+                    branch: branch.to_owned(),
+                    sha: existing_sha,
+                },
+            )
+            .await?;
+
+        Ok(GitHubUploadedFile {
+            path: path.to_owned(),
+            sha: response.content.sha,
         })
     }
 
@@ -470,10 +513,7 @@ impl GitHubProvider {
         Ok(raw.into_iter().map(CommitSummary::from).collect())
     }
 
-    pub async fn list_branches(
-        &self,
-        reference: &WorkspaceRef,
-    ) -> Result<Vec<String>> {
+    pub async fn list_branches(&self, reference: &WorkspaceRef) -> Result<Vec<String>> {
         #[derive(Deserialize)]
         struct BranchResponse {
             name: String,
@@ -499,22 +539,26 @@ impl GitHubProvider {
     }
 
     pub async fn list_user_repository_invitations(&self) -> Result<Vec<RepositoryInvitation>> {
-        let raw: Vec<RepositoryInvitationResponse> =
-            self.get_json("/user/repository_invitations?per_page=50").await?;
+        let raw: Vec<RepositoryInvitationResponse> = self
+            .get_json("/user/repository_invitations?per_page=50")
+            .await?;
         Ok(raw.into_iter().map(RepositoryInvitation::from).collect())
     }
 
     pub async fn accept_user_repository_invitation(&self, invitation_id: u64) -> Result<()> {
-        let url = format!("{}/user/repository_invitations/{invitation_id}", self.api_base);
+        let url = format!(
+            "{}/user/repository_invitations/{invitation_id}",
+            self.api_base
+        );
         tracing::debug!(target: "teamai-github", method = "PATCH", invitation_id);
-        let response = self
-            .client
-            .patch(url)
-            .send()
-            .await
-            .map_err(|err| ProviderError::NetworkError {
-                cause: err.to_string(),
-            })?;
+        let response =
+            self.client
+                .patch(url)
+                .send()
+                .await
+                .map_err(|err| ProviderError::NetworkError {
+                    cause: err.to_string(),
+                })?;
         let status = response.status();
         if status.is_success() {
             return Ok(());
@@ -739,7 +783,10 @@ struct RepositoryEventResponse {
 
 impl From<RepositoryEventResponse> for RepositoryEvent {
     fn from(value: RepositoryEventResponse) -> Self {
-        let event_type = value.event_type.clone().unwrap_or_else(|| "unknown".to_owned());
+        let event_type = value
+            .event_type
+            .clone()
+            .unwrap_or_else(|| "unknown".to_owned());
         let (summary, html_url) = match (event_type.as_str(), value.payload.as_ref()) {
             ("PushEvent", Some(payload)) => {
                 let r#ref = payload
@@ -784,10 +831,7 @@ impl From<RepositoryEventResponse> for RepositoryEvent {
                     .get("ref_type")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let r#ref = payload
-                    .get("ref")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let r#ref = payload.get("ref").and_then(|v| v.as_str()).unwrap_or("");
                 (format!("Created {kind} {ref}"), None)
             }
             (other, _) => (other.to_owned(), None),
@@ -1491,6 +1535,8 @@ struct PutContentRequest {
     message: String,
     content: String,
     branch: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sha: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1833,7 +1879,10 @@ mod tests {
             Some("owner-repo-387020e"),
             "extracted_root should be the real repo dir, got {extracted_root:?}"
         );
-        assert!(extracted_root.is_dir(), "extracted_root must exist as a dir");
+        assert!(
+            extracted_root.is_dir(),
+            "extracted_root must exist as a dir"
+        );
         assert!(
             extracted_root
                 .join("skills/cat/nested-skill/SKILL.md")
@@ -2034,7 +2083,10 @@ mod tests {
         graphql_mock.assert_async().await;
 
         let ids: Vec<&str> = skills.iter().map(|s| s.manifest.id.as_str()).collect();
-        assert_eq!(ids, vec!["code-reviewer", "pr-summarizer", "security-auditor"]);
+        assert_eq!(
+            ids,
+            vec!["code-reviewer", "pr-summarizer", "security-auditor"]
+        );
     }
 
     /// One bad manifest must not poison the whole workspace — the rest of the
@@ -2046,10 +2098,7 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
 
         let _tree = server
-            .mock(
-                "GET",
-                "/repos/acme/team-skills/git/trees/main?recursive=1",
-            )
+            .mock("GET", "/repos/acme/team-skills/git/trees/main?recursive=1")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
@@ -2090,7 +2139,11 @@ mod tests {
                 .expect("scan succeeded despite one bad manifest");
 
         let ids: Vec<&str> = skills.iter().map(|s| s.manifest.id.as_str()).collect();
-        assert_eq!(ids, vec!["good-skill"], "bad manifest must be skipped, not crash the scan");
+        assert_eq!(
+            ids,
+            vec!["good-skill"],
+            "bad manifest must be skipped, not crash the scan"
+        );
     }
 
     /// Empty repo (no manifests at all) is a valid result — empty skill list,
@@ -2102,10 +2155,7 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
 
         let _tree = server
-            .mock(
-                "GET",
-                "/repos/acme/team-skills/git/trees/main?recursive=1",
-            )
+            .mock("GET", "/repos/acme/team-skills/git/trees/main?recursive=1")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{ "tree": [{"path": "README.md", "type": "blob", "sha": "a"}] }"#)

@@ -422,6 +422,19 @@ impl Database {
         }
     }
 
+    pub fn get_cache_many(&self, keys: &[String]) -> rusqlite::Result<Vec<Option<Vec<u8>>>> {
+        let mut stmt = self.conn.prepare("SELECT data FROM cache_entries WHERE key = ?1")?;
+        keys.iter()
+            .map(|key| {
+                let mut rows = stmt.query_map(params![key], |row| row.get::<_, Vec<u8>>(0))?;
+                match rows.next() {
+                    Some(data) => Ok(Some(data?)),
+                    None => Ok(None),
+                }
+            })
+            .collect()
+    }
+
     pub fn put_cache(&self, key: &str, workspace: &str, data: &[u8]) -> rusqlite::Result<()> {
         let now = chrono::Utc::now().timestamp();
         self.conn.execute(

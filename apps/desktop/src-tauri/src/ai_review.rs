@@ -30,6 +30,7 @@ use genai::chat::{ChatMessage, ChatOptions, ChatRequest, ContentPart};
 use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
 use genai::{Client, ModelIden, ServiceTarget};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Per-text-file cap. Larger files are truncated with a marker.
 const MAX_TEXT_FILE_BYTES: usize = 512 * 1024;
@@ -99,6 +100,10 @@ pub struct ReviewResult {
     pub verdict: String,
     pub summary: String,
     pub findings: Vec<ReviewFinding>,
+    /// SHA-256 hash of all skill file contents (sorted by path), used for cache
+    /// invalidation. Hex-encoded, lowercase.
+    #[serde(default)]
+    pub content_hash: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -169,6 +174,9 @@ struct CollectedSkill {
     skipped: Vec<String>,
     /// True if we hit the total text budget and stopped inlining text files.
     text_truncated: bool,
+    /// SHA-256 hash of every collected file path and raw content, in sorted path
+    /// order. Used by callers to invalidate cached review results.
+    content_hash: String,
 }
 
 /// Truncate a &str to at most `max` bytes without splitting a UTF-8 char.
@@ -196,7 +204,9 @@ fn collect_skill_files(root: &Path) -> Result<CollectedSkill, ReviewError> {
         let read = std::fs::read_dir(&dir).map_err(|e| ReviewError::Io(e.to_string()))?;
         for entry in read {
             let entry = entry.map_err(|e| ReviewError::Io(e.to_string()))?;
-            let file_type = entry.file_type().map_err(|e| ReviewError::Io(e.to_string()))?;
+            let file_type = entry
+                .file_type()
+                .map_err(|e| ReviewError::Io(e.to_string()))?;
             let path = entry.path();
             if file_type.is_dir() {
                 let name = entry.file_name();
@@ -212,6 +222,7 @@ fn collect_skill_files(root: &Path) -> Result<CollectedSkill, ReviewError> {
     }
     files.sort();
 
+    let mut hasher = Sha256::new();
     for path in files {
         let rel = path
             .strip_prefix(root)
@@ -223,6 +234,12 @@ fn collect_skill_files(root: &Path) -> Result<CollectedSkill, ReviewError> {
             .map(|m| m.len())
             .map_err(|e| ReviewError::Io(e.to_string()))?;
 
+        let bytes = std::fs::read(&path).map_err(|e| ReviewError::Io(e.to_string()))?;
+        hasher.update(rel.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(&bytes);
+        hasher.update(b"\0");
+
         let is_pdf = path
             .extension()
             .map(|e| e.eq_ignore_ascii_case("pdf"))
@@ -230,27 +247,31 @@ fn collect_skill_files(root: &Path) -> Result<CollectedSkill, ReviewError> {
 
         if is_pdf {
             if collected.pdfs.len() >= MAX_PDFS {
-                collected.skipped.push(format!("{rel} (pdf — attachment limit reached)"));
+                collected
+                    .skipped
+                    .push(format!("{rel} (pdf — attachment limit reached)"));
             } else if size > MAX_PDF_BYTES {
                 collected.skipped.push(format!("{rel} (pdf — too large)"));
             } else {
-                let bytes = std::fs::read(&path).map_err(|e| ReviewError::Io(e.to_string()))?;
                 collected.pdfs.push((rel, bytes));
             }
             continue;
         }
 
-        let bytes = std::fs::read(&path).map_err(|e| ReviewError::Io(e.to_string()))?;
         match String::from_utf8(bytes) {
             Ok(text) => {
                 if total_text >= MAX_TOTAL_TEXT_BYTES {
                     collected.text_truncated = true;
-                    collected.skipped.push(format!("{rel} (text — total size budget exceeded)"));
+                    collected
+                        .skipped
+                        .push(format!("{rel} (text — total size budget exceeded)"));
                     continue;
                 }
                 let slice = truncate_at_char_boundary(&text, MAX_TEXT_FILE_BYTES);
                 let file_truncated = slice.len() < text.len();
-                collected.text_blob.push_str(&format!("\n===== {rel} =====\n"));
+                collected
+                    .text_blob
+                    .push_str(&format!("\n===== {rel} =====\n"));
                 collected.text_blob.push_str(slice);
                 if file_truncated {
                     collected.text_blob.push_str("\n[... file truncated ...]\n");
@@ -264,13 +285,24 @@ fn collect_skill_files(root: &Path) -> Result<CollectedSkill, ReviewError> {
         }
     }
 
+    collected.content_hash = format!("{:x}", hasher.finalize());
     Ok(collected)
+}
+
+/// Compute the same content hash used on review results without invoking an AI
+/// provider. This is used for cache validation.
+pub fn content_hash_for_dir(root: &Path) -> Result<String, ReviewError> {
+    Ok(collect_skill_files(root)?.content_hash)
 }
 
 /// Build the user-message content parts: a header describing the skill and any
 /// excluded files, the inlined text blob, and one attachment per PDF.
-fn build_review_parts(req: &ReviewRequest, skill_dir: &Path) -> Result<Vec<ContentPart>, ReviewError> {
+fn build_review_parts(
+    req: &ReviewRequest,
+    skill_dir: &Path,
+) -> Result<(Vec<ContentPart>, String), ReviewError> {
     let collected = collect_skill_files(skill_dir)?;
+    let content_hash = collected.content_hash.clone();
 
     let perms = if req.permissions.is_empty() {
         "(none declared)".to_string()
@@ -297,7 +329,9 @@ fn build_review_parts(req: &ReviewRequest, skill_dir: &Path) -> Result<Vec<Conte
         }
     }
     if collected.text_truncated {
-        header.push_str("\n[Some text files were omitted because the total size budget was exceeded.]\n");
+        header.push_str(
+            "\n[Some text files were omitted because the total size budget was exceeded.]\n",
+        );
     }
 
     let mut parts = vec![ContentPart::from_text(header)];
@@ -306,14 +340,16 @@ fn build_review_parts(req: &ReviewRequest, skill_dir: &Path) -> Result<Vec<Conte
     }
     for (rel, bytes) in collected.pdfs {
         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        parts.push(ContentPart::from_text(format!("===== {rel} (PDF attachment) =====")));
+        parts.push(ContentPart::from_text(format!(
+            "===== {rel} (PDF attachment) ====="
+        )));
         parts.push(ContentPart::from_binary_base64(
             "application/pdf",
             b64,
             Some(rel),
         ));
     }
-    Ok(parts)
+    Ok((parts, content_hash))
 }
 
 /// Map the configured provider string to a genai wire protocol (adapter).
@@ -357,7 +393,9 @@ fn build_client(
             })
         },
     );
-    Ok(Client::builder().with_service_target_resolver(resolver).build())
+    Ok(Client::builder()
+        .with_service_target_resolver(resolver)
+        .build())
 }
 
 /// Run the review against the configured provider. `skill_dir` is the locally
@@ -367,7 +405,7 @@ pub async fn review_skill(
     skill_dir: &Path,
     api_key: &str,
 ) -> Result<ReviewResult, ReviewError> {
-    let parts = build_review_parts(req, skill_dir)?;
+    let (parts, content_hash) = build_review_parts(req, skill_dir)?;
     let text_parts = parts.iter().filter(|p| p.as_text().is_some()).count();
     let pdf_parts = parts.len().saturating_sub(text_parts);
 
@@ -421,7 +459,10 @@ pub async fn review_skill(
         ReviewError::Parse("provider returned no text content".to_owned())
     })?;
 
-    let result = parse_model_json(&raw);
+    let result = parse_model_json(&raw).map(|mut result| {
+        result.content_hash = content_hash;
+        result
+    });
     match &result {
         Ok(r) => tracing::info!(
             target: "teamai-ai",
@@ -563,7 +604,10 @@ mod tests {
     #[test]
     fn adapter_for_maps_known_providers() {
         assert!(matches!(adapter_for("openai"), Ok(AdapterKind::OpenAI)));
-        assert!(matches!(adapter_for("anthropic"), Ok(AdapterKind::Anthropic)));
+        assert!(matches!(
+            adapter_for("anthropic"),
+            Ok(AdapterKind::Anthropic)
+        ));
         assert!(matches!(
             adapter_for("gemini"),
             Err(ReviewError::UnsupportedProvider(_))
@@ -579,7 +623,7 @@ mod tests {
     #[test]
     fn truncate_respects_char_boundary() {
         let s = "héllo"; // 'é' is 2 bytes
-        // max=2 would split 'é'; expect to back off to 1 byte ("h")
+                         // max=2 would split 'é'; expect to back off to 1 byte ("h")
         assert_eq!(truncate_at_char_boundary(s, 2), "h");
         assert_eq!(truncate_at_char_boundary(s, 100), s);
     }
@@ -642,7 +686,7 @@ mod tests {
         fs::write(dir.join("SKILL.md"), "hello world").unwrap();
         fs::write(dir.join("notes.pdf"), b"%PDF fake").unwrap();
 
-        let parts = build_review_parts(&sample_request(), &dir).unwrap();
+        let (parts, content_hash) = build_review_parts(&sample_request(), &dir).unwrap();
         // header text + text blob + pdf header text + pdf binary = 4 parts
         let text_count = parts.iter().filter(|p| p.as_text().is_some()).count();
         assert!(text_count >= 2, "expected header + text blob parts");
@@ -651,6 +695,7 @@ mod tests {
         assert!(header.contains("Skill name: X"));
         assert!(header.contains("shell.execute"));
         assert!(header.contains("PDF"));
+        assert!(!content_hash.is_empty());
 
         fs::remove_dir_all(&dir).ok();
     }

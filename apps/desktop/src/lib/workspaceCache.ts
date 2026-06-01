@@ -1,5 +1,6 @@
 import {
   dbCacheGet,
+  dbCacheGetMany,
   dbCachePut,
   dbCacheDelete,
   dbCacheDeletePrefix,
@@ -11,12 +12,14 @@ import {
   remoteCacheDeleteWorkspace,
   remoteCacheStats,
   type CachedFileResult,
+  type AiReviewFinding,
   type RemoteCacheStat,
 } from "./teamai";
 
 const CACHE_PREFIX = "teamai-ws-cache:";
 const TREE_PREFIX = "teamai-tree:";
 const DETAIL_PREFIX = "teamai-detail:";
+const REVIEW_PREFIX = "teamai-review:";
 
 // ---------------------------------------------------------------------------
 // Helpers: encode/decode JSON ↔ base64 for SQLite BLOB storage (metadata only)
@@ -220,6 +223,66 @@ export async function clearSkillDetail(workspace: string, skillPath: string): Pr
   try {
     const prefix = `${DETAIL_PREFIX}${workspace}:${skillPath}:`;
     await dbCacheDeletePrefix(prefix);
+  } catch { /* ignore */ }
+}
+
+// ---------------------------------------------------------------------------
+// AI review cache (per workspace + skill path) — stored in SQLite
+// ---------------------------------------------------------------------------
+
+export interface ReviewCacheEntry {
+  verdict: "safe" | "caution" | "danger";
+  summary: string;
+  findings: AiReviewFinding[];
+  contentHash: string;
+  reviewedAt: string;
+  reviewedBy?: string | null;
+  model: string;
+  synced?: boolean;
+}
+
+function reviewKey(workspace: string, skillPath: string): string {
+  return `${REVIEW_PREFIX}${workspace}:${skillPath}`;
+}
+
+export async function getReviewCache(
+  workspace: string,
+  skillPath: string,
+): Promise<ReviewCacheEntry | null> {
+  try {
+    const raw = await dbCacheGet(reviewKey(workspace, skillPath));
+    if (!raw) return null;
+    return fromBase64<ReviewCacheEntry>(raw);
+  } catch {
+    return null;
+  }
+}
+
+export async function getReviewCaches(
+  workspace: string,
+  skillPaths: string[],
+): Promise<Array<ReviewCacheEntry | null>> {
+  try {
+    const rawEntries = await dbCacheGetMany(skillPaths.map((skillPath) => reviewKey(workspace, skillPath)));
+    return rawEntries.map((raw) => raw ? fromBase64<ReviewCacheEntry>(raw) : null);
+  } catch {
+    return skillPaths.map(() => null);
+  }
+}
+
+export async function putReviewCache(
+  workspace: string,
+  skillPath: string,
+  result: ReviewCacheEntry,
+): Promise<void> {
+  try {
+    await dbCachePut(reviewKey(workspace, skillPath), workspace, toBase64(result));
+  } catch { /* non-critical */ }
+}
+
+export async function clearReviewCache(workspace: string, skillPath: string): Promise<void> {
+  try {
+    await dbCacheDelete(reviewKey(workspace, skillPath));
   } catch { /* ignore */ }
 }
 

@@ -254,8 +254,8 @@ export function SkillDetail({
 
   return (
     <div className="flex h-full flex-col">
-      {/* Compact header */}
-      <div className="border-b border-[var(--line)] bg-[var(--bg-elevated)] px-5 py-3.5">
+      {/* Compact header — no bottom border; flows into the tab bar below */}
+      <div className="bg-[var(--bg-elevated)] px-5 py-3.5">
         <div className="flex items-center gap-3">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
@@ -500,7 +500,13 @@ export function SkillDetail({
 
           {tab === "risk" ? (
             <div className="px-5 py-4">
-              <SkillRiskPanel manifest={activeAsset.manifest} skillPath={activeAsset.path} workspace={workspaceRef} refName={selectedRef} />
+              <SkillRiskPanel
+                manifest={activeAsset.manifest}
+                skillPath={activeAsset.path}
+                workspace={workspaceRef}
+                refName={selectedRef}
+                workspacePermission={detail?.workspace.permission}
+              />
             </div>
           ) : null}
         </div>

@@ -1,13 +1,13 @@
 mod ai_review;
 mod db;
 
+use base64::Engine as _;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
-use base64::Engine as _;
 use tauri::{Emitter, Manager};
 use tauri_plugin_opener::OpenerExt;
 use teamai_core::{AppPaths, GitHubCredential, WorkspaceRef};
@@ -513,15 +513,14 @@ async fn scan_github_workspace_streaming(
     let workspace = parse_workspace(&workspace)?;
     let token = token.or_else(|| saved_github_token(&paths));
     let app_handle = app.clone();
-    let remote: RemoteWorkspaceSkills =
-        teamai_sync::scan_github_workspace_skills_streaming(
-            &workspace,
-            token.as_deref(),
-            |batch| {
-                let _ = app_handle.emit("workspace-scan-progress", batch);
-            },
-        )
-        .await?;
+    let remote: RemoteWorkspaceSkills = teamai_sync::scan_github_workspace_skills_streaming(
+        &workspace,
+        token.as_deref(),
+        |batch| {
+            let _ = app_handle.emit("workspace-scan-progress", batch);
+        },
+    )
+    .await?;
     Ok(WorkspaceSkillsResponse {
         workspace: remote.workspace,
         skills: remote.skills,
@@ -917,11 +916,12 @@ fn install_skill(
 }
 
 #[tauri::command]
-fn remove_skill(
-    skill_id: String,
-    targets: Vec<String>,
-) -> CommandResult<Vec<PathBuf>> {
-    Ok(teamai_installer::remove(&skill_id, &targets, Vec::<TargetRoot>::new())?)
+fn remove_skill(skill_id: String, targets: Vec<String>) -> CommandResult<Vec<PathBuf>> {
+    Ok(teamai_installer::remove(
+        &skill_id,
+        &targets,
+        Vec::<TargetRoot>::new(),
+    )?)
 }
 
 // ---------------------------------------------------------------------------
@@ -1001,6 +1001,14 @@ struct UnmanagedSkillInfo {
     name: String,
     path: String,
     found_in: Vec<String>,
+    locations: Vec<UnmanagedSkillLocationInfo>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UnmanagedSkillLocationInfo {
+    runtime: String,
+    path: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1037,8 +1045,12 @@ fn db_list_runtimes() -> CommandResult<Vec<SupportedRuntime>> {
 fn db_list_skills(app: tauri::AppHandle) -> CommandResult<Vec<ManagedSkill>> {
     let database = app.state::<Mutex<db::Database>>();
     let db = database.lock().unwrap();
-    let skills = db.list_skills().map_err(|e| CommandError::coded("db_error", e.to_string()))?;
-    let all_targets = db.get_all_targets().map_err(|e| CommandError::coded("db_error", e.to_string()))?;
+    let skills = db
+        .list_skills()
+        .map_err(|e| CommandError::coded("db_error", e.to_string()))?;
+    let all_targets = db
+        .get_all_targets()
+        .map_err(|e| CommandError::coded("db_error", e.to_string()))?;
 
     Ok(skills
         .into_iter()
@@ -1097,10 +1109,18 @@ fn db_enable_skill(app: tauri::AppHandle, skill_id: String, runtime: String) -> 
     let skill = db_guard
         .get_skill(&skill_id)
         .map_err(|e| CommandError::coded("db_error", e.to_string()))?
-        .ok_or_else(|| CommandError::coded("skill_not_found", format!("skill '{}' not in registry", skill_id)))?;
+        .ok_or_else(|| {
+            CommandError::coded(
+                "skill_not_found",
+                format!("skill '{}' not in registry", skill_id),
+            )
+        })?;
 
     let target_dir = db::resolve_runtime_global_path(&home, &runtime).ok_or_else(|| {
-        CommandError::coded("unsupported_runtime", format!("runtime '{}' is not supported", runtime))
+        CommandError::coded(
+            "unsupported_runtime",
+            format!("runtime '{}' is not supported", runtime),
+        )
     })?;
     let target_path = target_dir.join(&skill_id);
     let source_path = PathBuf::from(&skill.local_path);
@@ -1125,7 +1145,10 @@ fn db_disable_skill(app: tauri::AppHandle, skill_id: String, runtime: String) ->
     let db_guard = database.lock().unwrap();
 
     let target_dir = db::resolve_runtime_global_path(&home, &runtime).ok_or_else(|| {
-        CommandError::coded("unsupported_runtime", format!("runtime '{}' is not supported", runtime))
+        CommandError::coded(
+            "unsupported_runtime",
+            format!("runtime '{}' is not supported", runtime),
+        )
     })?;
     let target_path = target_dir.join(&skill_id);
 
@@ -1156,6 +1179,14 @@ fn db_scan_unmanaged(app: tauri::AppHandle) -> CommandResult<Vec<UnmanagedSkillI
             name: s.name,
             path: s.path.to_string_lossy().to_string(),
             found_in: s.found_in,
+            locations: s
+                .locations
+                .into_iter()
+                .map(|location| UnmanagedSkillLocationInfo {
+                    runtime: location.runtime,
+                    path: location.path.to_string_lossy().to_string(),
+                })
+                .collect(),
         })
         .collect())
 }
@@ -1174,7 +1205,18 @@ fn db_import_skill(
 
     let link_mode = link_mode.unwrap_or_else(|| "symlink".to_owned());
     let source = PathBuf::from(&source_path);
-    let dest = paths.home.join("skills").join(&skill_id);
+    if !source.is_dir() {
+        return Err(CommandError::coded(
+            "invalid_skill_source",
+            format!("'{}' is not a directory", source.display()),
+        ));
+    }
+
+    let source_manifest = teamai_manifest::parse_skill_dir(&source)
+        .ok()
+        .and_then(|p| p.manifest);
+    let resolved_skill_id = resolve_import_skill_id(&skill_id, &source, source_manifest.as_ref())?;
+    let dest = paths.home.join("skills").join(&resolved_skill_id);
 
     // Copy skill to our data directory
     if !dest.exists() {
@@ -1187,21 +1229,30 @@ fn db_import_skill(
         .ok()
         .and_then(|p| p.manifest);
 
-    let name = manifest.as_ref().map(|m| m.name.clone()).unwrap_or_else(|| skill_id.clone());
-    let description = manifest.as_ref().map(|m| m.description.clone()).unwrap_or_default();
-    let version = manifest.as_ref().map(|m| m.version.clone()).unwrap_or_else(|| "0.1.0".to_owned());
+    let name = manifest
+        .as_ref()
+        .map(|m| m.name.clone())
+        .unwrap_or_else(|| db::humanize_name(&resolved_skill_id));
+    let description = manifest
+        .as_ref()
+        .map(|m| m.description.clone())
+        .unwrap_or_default();
+    let version = manifest
+        .as_ref()
+        .map(|m| m.version.clone())
+        .unwrap_or_else(|| "0.1.0".to_owned());
 
     // Compute content hash for change detection
     let baseline_hash = db::compute_dir_hash(&dest);
 
     db_guard
         .insert_skill(
-            &skill_id,
+            &resolved_skill_id,
             &name,
             &description,
             &version,
-            "",
-            "",
+            "local",
+            &source_path,
             "",
             &dest.to_string_lossy(),
             &link_mode,
@@ -1210,15 +1261,15 @@ fn db_import_skill(
         .map_err(|e| CommandError::coded("db_error", e.to_string()))?;
 
     let targets = db_guard
-        .get_targets_for_skill(&skill_id)
+        .get_targets_for_skill(&resolved_skill_id)
         .map_err(|e| CommandError::coded("db_error", e.to_string()))?;
 
     Ok(ManagedSkill {
-        id: skill_id,
+        id: resolved_skill_id,
         name,
         description,
         version,
-        source_workspace: String::new(),
+        source_workspace: "local".to_owned(),
         source_path: source_path,
         source_branch: String::new(),
         local_path: dest.to_string_lossy().to_string(),
@@ -1244,6 +1295,53 @@ fn db_import_skill(
             })
             .collect(),
     })
+}
+
+fn resolve_import_skill_id(
+    requested: &str,
+    source: &Path,
+    manifest: Option<&teamai_manifest::SkillManifest>,
+) -> CommandResult<String> {
+    let candidate = requested
+        .trim()
+        .is_empty()
+        .then(|| manifest.map(|m| m.id.as_str()))
+        .flatten()
+        .unwrap_or_else(|| requested.trim());
+
+    let fallback = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("skill");
+    let raw = if candidate.is_empty() {
+        fallback
+    } else {
+        candidate
+    };
+    let id = sanitize_skill_id(raw);
+    if id.is_empty() {
+        return Err(CommandError::coded(
+            "invalid_skill_id",
+            "skill id could not be inferred from the selected directory",
+        ));
+    }
+    Ok(id)
+}
+
+fn sanitize_skill_id(value: &str) -> String {
+    value
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches(['-', '.', '_'])
+        .to_owned()
 }
 
 /// Progress event payload for an in-flight async skill download. Emitted on the
@@ -1470,6 +1568,7 @@ async fn run_skill_download(
             if let Err(err) = db_guard.finish_download(
                 &asset_id,
                 &prepared.manifest.version,
+                &prepared.ref_name,
                 &dest.to_string_lossy(),
                 &baseline_hash,
             ) {
@@ -1608,7 +1707,12 @@ fn db_cache_get_many(
 
 /// Put a cache entry (data is base64-encoded string from frontend).
 #[tauri::command]
-fn db_cache_put(app: tauri::AppHandle, key: String, workspace: String, data: String) -> CommandResult<()> {
+fn db_cache_put(
+    app: tauri::AppHandle,
+    key: String,
+    workspace: String,
+    data: String,
+) -> CommandResult<()> {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(&data)
@@ -1649,7 +1753,8 @@ fn db_cache_delete_prefix(app: tauri::AppHandle, prefix: String) -> CommandResul
 
 /// Resolve the remote cache root: ~/.team-ai-hub/remote/
 fn remote_cache_root() -> CommandResult<PathBuf> {
-    let home = dirs::home_dir().ok_or_else(|| CommandError::coded("no_home", "cannot resolve home directory"))?;
+    let home = dirs::home_dir()
+        .ok_or_else(|| CommandError::coded("no_home", "cannot resolve home directory"))?;
     Ok(home.join(".team-ai-hub").join("remote"))
 }
 
@@ -1685,6 +1790,27 @@ fn build_cache_path(workspace: &str, ref_name: &str, file_path: &str) -> Command
     Ok(root.join(workspace).join(ref_name).join(file_path))
 }
 
+fn write_remote_cache_file_bytes(
+    workspace: &str,
+    ref_name: &str,
+    file_path: &str,
+    bytes: &[u8],
+) -> CommandResult<()> {
+    let target = build_cache_path(workspace, ref_name, file_path)?;
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| CommandError::coded("io_error", format!("mkdir failed: {}", e)))?;
+    }
+    fs::write(&target, bytes)
+        .map_err(|e| CommandError::coded("io_error", format!("write failed: {}", e)))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&target, fs::Permissions::from_mode(0o644));
+    }
+    Ok(())
+}
+
 /// Write a file to the remote cache. Binary data is passed as base64.
 #[tauri::command]
 fn remote_cache_put_file(
@@ -1694,28 +1820,15 @@ fn remote_cache_put_file(
     data: String,
     is_binary: bool,
 ) -> CommandResult<()> {
-    let target = build_cache_path(&workspace, &ref_name, &file_path)?;
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| CommandError::coded("io_error", format!("mkdir failed: {}", e)))?;
-    }
-    if is_binary {
+    let bytes = if is_binary {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&data)
             .map_err(|e| CommandError::coded("decode_error", e.to_string()))?;
-        fs::write(&target, &bytes)
-            .map_err(|e| CommandError::coded("io_error", format!("write failed: {}", e)))?;
+        bytes
     } else {
-        fs::write(&target, data.as_bytes())
-            .map_err(|e| CommandError::coded("io_error", format!("write failed: {}", e)))?;
-    }
-    // Remove execute permission (644)
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&target, fs::Permissions::from_mode(0o644));
-    }
-    Ok(())
+        data.into_bytes()
+    };
+    write_remote_cache_file_bytes(&workspace, &ref_name, &file_path, &bytes)
 }
 
 /// Read a file from the remote cache. Returns content + is_binary flag.
@@ -1807,13 +1920,17 @@ fn remote_cache_stats() -> CommandResult<Vec<RemoteCacheStat>> {
     if let Ok(owners) = fs::read_dir(&root) {
         for owner_entry in owners.flatten() {
             let owner_path = owner_entry.path();
-            if !owner_path.is_dir() { continue; }
+            if !owner_path.is_dir() {
+                continue;
+            }
             let owner_name = owner_entry.file_name().to_string_lossy().to_string();
             // Walk repo dirs under owner
             if let Ok(repos) = fs::read_dir(&owner_path) {
                 for repo_entry in repos.flatten() {
                     let repo_path = repo_entry.path();
-                    if !repo_path.is_dir() { continue; }
+                    if !repo_path.is_dir() {
+                        continue;
+                    }
                     let repo_name = repo_entry.file_name().to_string_lossy().to_string();
                     let workspace = format!("{}/{}", owner_name, repo_name);
                     let (total_bytes, file_count) = dir_size_recursive(&repo_path);
@@ -1862,7 +1979,9 @@ fn dir_size_recursive(path: &Path) -> (u64, u64) {
 fn db_check_modifications(app: tauri::AppHandle) -> CommandResult<Vec<String>> {
     let database = app.state::<Mutex<db::Database>>();
     let db_guard = database.lock().unwrap();
-    let skills = db_guard.list_skills().map_err(|e| CommandError::coded("db_error", e.to_string()))?;
+    let skills = db_guard
+        .list_skills()
+        .map_err(|e| CommandError::coded("db_error", e.to_string()))?;
     let mut modified_ids = Vec::new();
     for skill in &skills {
         let is_mod = db_guard
@@ -1891,7 +2010,9 @@ fn db_unmanage_skill(app: tauri::AppHandle, skill_id: String) -> CommandResult<(
     let skill = db_guard
         .get_skill(&skill_id)
         .map_err(|e| CommandError::coded("db_error", e.to_string()))?
-        .ok_or_else(|| CommandError::coded("skill_not_found", format!("skill '{}' not found", skill_id)))?;
+        .ok_or_else(|| {
+            CommandError::coded("skill_not_found", format!("skill '{}' not found", skill_id))
+        })?;
 
     let source_path = PathBuf::from(&skill.local_path);
 
@@ -2005,10 +2126,7 @@ async fn fetch_remote_skill_to_temp(
     let prefix = format!("{trimmed_path}/");
     let entries: Vec<_> = files
         .into_iter()
-        .filter(|entry| {
-            entry.path == trimmed_path
-                || entry.path.starts_with(&prefix)
-        })
+        .filter(|entry| entry.path == trimmed_path || entry.path.starts_with(&prefix))
         .collect();
     if entries.is_empty() {
         return Err(CommandError::coded(
@@ -2111,7 +2229,11 @@ async fn preview_publish_from_workspace(
 
     let source_ws = parse_workspace(&source_workspace)?;
     let target_ws = parse_workspace(&target_workspace)?;
-    let git_ref = match source_ref.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let git_ref = match source_ref
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(name) if name.starts_with("refs/tags/") || !name.contains('/') => {
             // Cheap heuristic: look like a tag (semver-ish) -> Tag, else Branch.
             if name.chars().next().map(|c| c == 'v').unwrap_or(false)
@@ -2179,7 +2301,11 @@ async fn publish_skill_to_workspace(
 
     let source_ws = parse_workspace(&source_workspace)?;
     let target_ws = parse_workspace(&target_workspace)?;
-    let git_ref = match source_ref.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let git_ref = match source_ref
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(name) => {
             if name.chars().next().map(|c| c == 'v').unwrap_or(false)
                 || name.starts_with("refs/tags/")
@@ -2217,7 +2343,10 @@ async fn publish_skill_to_workspace(
     ) {
         return Err(CommandError::coded(
             "publish_rejected",
-            format!("publish policy rejected this skill: {}", policy.reasons.join("; ")),
+            format!(
+                "publish policy rejected this skill: {}",
+                policy.reasons.join("; ")
+            ),
         ));
     }
     if package.risk_level != teamai_core::RiskLevel::Low && !confirmed_risk.unwrap_or(false) {
@@ -2527,9 +2656,9 @@ async fn check_workspace_head(workspace: String) -> CommandResult<WorkspaceHeadI
         .await
         .map_err(provider_command_error)?;
 
-    let head = commits.first().ok_or_else(|| {
-        CommandError::coded("no_commits", "workspace has no commits")
-    })?;
+    let head = commits
+        .first()
+        .ok_or_else(|| CommandError::coded("no_commits", "workspace has no commits"))?;
 
     Ok(WorkspaceHeadInfo {
         sha: head.sha.clone(),
@@ -2606,14 +2735,19 @@ struct BranchInfo {
 async fn list_workspace_branches(workspace: String) -> CommandResult<Vec<BranchInfo>> {
     let paths = AppPaths::resolve()?;
     teamai_sync::ensure_local_state(&paths)?;
-    let token = saved_github_token(&paths).ok_or_else(|| {
-        CommandError::coded("missing_github_token", "log in with GitHub first")
-    })?;
+    let token = saved_github_token(&paths)
+        .ok_or_else(|| CommandError::coded("missing_github_token", "log in with GitHub first"))?;
     let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
     let workspace = parse_workspace(&workspace)?;
 
-    let ws_info = provider.get_workspace(&workspace).await.map_err(provider_command_error)?;
-    let branches = provider.list_branches(&workspace).await.map_err(provider_command_error)?;
+    let ws_info = provider
+        .get_workspace(&workspace)
+        .await
+        .map_err(provider_command_error)?;
+    let branches = provider
+        .list_branches(&workspace)
+        .await
+        .map_err(provider_command_error)?;
 
     Ok(branches
         .into_iter()
@@ -2647,15 +2781,16 @@ async fn list_skill_files(
     let paths = AppPaths::resolve()?;
     teamai_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
-    let token = saved_github_token(&paths).ok_or_else(|| {
-        CommandError::coded("missing_github_token", "log in with GitHub first")
-    })?;
-    let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
+    let token = saved_github_token(&paths);
+    let provider = github_provider(token.as_deref())?;
 
     let git_ref = match ref_name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(name) => GitRef::Branch(name.to_owned()),
         None => {
-            let ws_info = provider.get_workspace(&workspace).await.map_err(provider_command_error)?;
+            let ws_info = provider
+                .get_workspace(&workspace)
+                .await
+                .map_err(provider_command_error)?;
             GitRef::Branch(ws_info.default_branch)
         }
     };
@@ -2698,6 +2833,18 @@ struct FileContent {
     is_binary: bool,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillPackageCacheResult {
+    workspace: String,
+    skill_path: String,
+    ref_name: String,
+    file_count: usize,
+    cached_count: usize,
+    skipped_count: usize,
+    total_bytes: u64,
+}
+
 /// Reads a single file from the workspace repo.
 #[tauri::command]
 async fn read_skill_file(
@@ -2708,15 +2855,16 @@ async fn read_skill_file(
     let paths = AppPaths::resolve()?;
     teamai_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
-    let token = saved_github_token(&paths).ok_or_else(|| {
-        CommandError::coded("missing_github_token", "log in with GitHub first")
-    })?;
-    let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
+    let token = saved_github_token(&paths);
+    let provider = github_provider(token.as_deref())?;
 
     let git_ref = match ref_name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(name) => GitRef::Branch(name.to_owned()),
         None => {
-            let ws_info = provider.get_workspace(&workspace).await.map_err(provider_command_error)?;
+            let ws_info = provider
+                .get_workspace(&workspace)
+                .await
+                .map_err(provider_command_error)?;
             GitRef::Branch(ws_info.default_branch)
         }
     };
@@ -2729,15 +2877,100 @@ async fn read_skill_file(
     // Try to decode as UTF-8; if it fails, mark as binary
     let (content, is_binary) = match String::from_utf8(blob.bytes.clone()) {
         Ok(text) => (text, false),
-        Err(_) => (base64::engine::general_purpose::STANDARD.encode(&blob.bytes), true),
+        Err(_) => (
+            base64::engine::general_purpose::STANDARD.encode(&blob.bytes),
+            true,
+        ),
     };
 
     Ok(FileContent {
         path: blob.path,
         content,
         sha: blob.sha,
-        encoding: if is_binary { "base64".to_owned() } else { "utf-8".to_owned() },
+        encoding: if is_binary {
+            "base64".to_owned()
+        } else {
+            "utf-8".to_owned()
+        },
         is_binary,
+    })
+}
+
+/// Warms the local remote cache with all files inside a skill directory.
+#[tauri::command]
+async fn cache_skill_package(
+    workspace: String,
+    skill_path: String,
+    ref_name: Option<String>,
+) -> CommandResult<SkillPackageCacheResult> {
+    let paths = AppPaths::resolve()?;
+    teamai_sync::ensure_local_state(&paths)?;
+    let workspace_ref = parse_workspace(&workspace)?;
+    let workspace_label = workspace_ref.full_name();
+    let token = saved_github_token(&paths);
+    let provider = github_provider(token.as_deref())?;
+
+    let (git_ref, cache_ref) = match ref_name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(name) => (GitRef::Branch(name.to_owned()), name.to_owned()),
+        None => {
+            let ws_info = provider
+                .get_workspace(&workspace_ref)
+                .await
+                .map_err(provider_command_error)?;
+            (GitRef::Branch(ws_info.default_branch), "HEAD".to_owned())
+        }
+    };
+
+    let all_files = provider
+        .list_files(&workspace_ref, &git_ref)
+        .await
+        .map_err(provider_command_error)?;
+
+    let prefix = skill_path.trim_matches('/');
+    let prefix_with_slash = format!("{prefix}/");
+    let file_paths: Vec<String> = all_files
+        .into_iter()
+        .filter(|entry| entry.path.starts_with(&prefix_with_slash))
+        .filter(|entry| {
+            matches!(
+                entry.kind,
+                teamai_provider::FileKind::File | teamai_provider::FileKind::Symlink
+            )
+        })
+        .map(|entry| entry.path)
+        .collect();
+
+    let mut cached_count = 0usize;
+    let mut skipped_count = 0usize;
+    let mut total_bytes = 0u64;
+
+    for file_path in &file_paths {
+        let target = build_cache_path(&workspace_label, &cache_ref, file_path)?;
+        if target.exists() {
+            skipped_count += 1;
+            if let Ok(meta) = fs::metadata(&target) {
+                total_bytes = total_bytes.saturating_add(meta.len());
+            }
+            continue;
+        }
+
+        let blob = provider
+            .read_file(&workspace_ref, &git_ref, file_path)
+            .await
+            .map_err(provider_command_error)?;
+        total_bytes = total_bytes.saturating_add(blob.bytes.len() as u64);
+        write_remote_cache_file_bytes(&workspace_label, &cache_ref, &blob.path, &blob.bytes)?;
+        cached_count += 1;
+    }
+
+    Ok(SkillPackageCacheResult {
+        workspace: workspace_label,
+        skill_path: prefix.to_owned(),
+        ref_name: cache_ref,
+        file_count: file_paths.len(),
+        cached_count,
+        skipped_count,
+        total_bytes,
     })
 }
 
@@ -2798,9 +3031,8 @@ async fn list_skill_discussions(
     let paths = AppPaths::resolve()?;
     teamai_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
-    let token = saved_github_token(&paths).ok_or_else(|| {
-        CommandError::coded("missing_github_token", "log in with GitHub first")
-    })?;
+    let token = saved_github_token(&paths)
+        .ok_or_else(|| CommandError::coded("missing_github_token", "log in with GitHub first"))?;
     let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
 
     // Use GraphQL to check if discussions are enabled and fetch them
@@ -2933,7 +3165,11 @@ async fn list_skill_discussions(
                 title: d.title,
                 url: d.url,
                 body: d.body,
-                body_author: d.author.as_ref().map(|a| a.login.clone()).unwrap_or_else(|| "ghost".to_owned()),
+                body_author: d
+                    .author
+                    .as_ref()
+                    .map(|a| a.login.clone())
+                    .unwrap_or_else(|| "ghost".to_owned()),
                 body_author_avatar: d.author.and_then(|a| a.avatar_url),
                 upvotes: d.upvote_count,
                 comment_count: d.comments.total_count,
@@ -2959,9 +3195,8 @@ async fn get_discussion_by_number(
     let paths = AppPaths::resolve()?;
     teamai_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
-    let token = saved_github_token(&paths).ok_or_else(|| {
-        CommandError::coded("missing_github_token", "log in with GitHub first")
-    })?;
+    let token = saved_github_token(&paths)
+        .ok_or_else(|| CommandError::coded("missing_github_token", "log in with GitHub first"))?;
     let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
 
     #[derive(serde::Deserialize)]
@@ -3039,36 +3274,37 @@ async fn get_discussion_by_number(
         .await
         .map_err(provider_command_error)?;
 
-    let info = result
-        .repository
-        .and_then(|r| r.discussion)
-        .map(|d| {
-            let reactions: Vec<ReactionGroup> = d
-                .reaction_groups
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|r| r.reactors.total_count > 0)
-                .map(|r| ReactionGroup {
-                    content: r.content,
-                    count: r.reactors.total_count,
-                    viewer_has_reacted: r.viewer_has_reacted,
-                })
-                .collect();
-            DiscussionInfo {
-                id: d.id,
-                number: d.number,
-                title: d.title,
-                url: d.url,
-                body: d.body,
-                body_author: d.author.as_ref().map(|a| a.login.clone()).unwrap_or_else(|| "ghost".to_owned()),
-                body_author_avatar: d.author.and_then(|a| a.avatar_url),
-                upvotes: d.upvote_count,
-                comment_count: d.comments.total_count,
-                created_at: d.created_at,
-                has_discussions: true,
-                reactions,
-            }
-        });
+    let info = result.repository.and_then(|r| r.discussion).map(|d| {
+        let reactions: Vec<ReactionGroup> = d
+            .reaction_groups
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.reactors.total_count > 0)
+            .map(|r| ReactionGroup {
+                content: r.content,
+                count: r.reactors.total_count,
+                viewer_has_reacted: r.viewer_has_reacted,
+            })
+            .collect();
+        DiscussionInfo {
+            id: d.id,
+            number: d.number,
+            title: d.title,
+            url: d.url,
+            body: d.body,
+            body_author: d
+                .author
+                .as_ref()
+                .map(|a| a.login.clone())
+                .unwrap_or_else(|| "ghost".to_owned()),
+            body_author_avatar: d.author.and_then(|a| a.avatar_url),
+            upvotes: d.upvote_count,
+            comment_count: d.comments.total_count,
+            created_at: d.created_at,
+            has_discussions: true,
+            reactions,
+        }
+    });
 
     Ok(info)
 }
@@ -3082,9 +3318,8 @@ async fn get_discussion_comments(
     let paths = AppPaths::resolve()?;
     teamai_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
-    let token = saved_github_token(&paths).ok_or_else(|| {
-        CommandError::coded("missing_github_token", "log in with GitHub first")
-    })?;
+    let token = saved_github_token(&paths)
+        .ok_or_else(|| CommandError::coded("missing_github_token", "log in with GitHub first"))?;
     let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
 
     #[derive(serde::Deserialize)]
@@ -3181,7 +3416,11 @@ async fn get_discussion_comments(
                 .collect();
             DiscussionComment {
                 id: c.id,
-                author: c.author.as_ref().map(|a| a.login.clone()).unwrap_or_else(|| "ghost".to_owned()),
+                author: c
+                    .author
+                    .as_ref()
+                    .map(|a| a.login.clone())
+                    .unwrap_or_else(|| "ghost".to_owned()),
                 author_avatar: c.author.and_then(|a| a.avatar_url),
                 body: c.body,
                 created_at: c.created_at,
@@ -3204,9 +3443,8 @@ async fn add_discussion_comment(
     let paths = AppPaths::resolve()?;
     teamai_sync::ensure_local_state(&paths)?;
     let _workspace = parse_workspace(&workspace)?;
-    let token = saved_github_token(&paths).ok_or_else(|| {
-        CommandError::coded("missing_github_token", "log in with GitHub first")
-    })?;
+    let token = saved_github_token(&paths)
+        .ok_or_else(|| CommandError::coded("missing_github_token", "log in with GitHub first"))?;
     let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
 
     #[derive(serde::Deserialize)]
@@ -3233,7 +3471,10 @@ async fn add_discussion_comment(
         avatar_url: Option<String>,
     }
 
-    let escaped_body = body.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+    let escaped_body = body
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n");
     let query = format!(
         r#"mutation {{
             addDiscussionComment(input: {{discussionId: "{discussion_id}", body: "{escaped_body}"}}) {{
@@ -3259,7 +3500,11 @@ async fn add_discussion_comment(
 
     Ok(DiscussionComment {
         id: comment.id,
-        author: comment.author.as_ref().map(|a| a.login.clone()).unwrap_or_else(|| "ghost".to_owned()),
+        author: comment
+            .author
+            .as_ref()
+            .map(|a| a.login.clone())
+            .unwrap_or_else(|| "ghost".to_owned()),
         author_avatar: comment.author.and_then(|a| a.avatar_url),
         body: comment.body,
         created_at: comment.created_at,
@@ -3279,15 +3524,26 @@ async fn toggle_discussion_reaction(
     let paths = AppPaths::resolve()?;
     teamai_sync::ensure_local_state(&paths)?;
     let _workspace = parse_workspace(&workspace)?;
-    let token = saved_github_token(&paths).ok_or_else(|| {
-        CommandError::coded("missing_github_token", "log in with GitHub first")
-    })?;
+    let token = saved_github_token(&paths)
+        .ok_or_else(|| CommandError::coded("missing_github_token", "log in with GitHub first"))?;
     let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
 
     // Validate reaction content
-    let valid_reactions = ["THUMBS_UP", "THUMBS_DOWN", "LAUGH", "HOORAY", "CONFUSED", "HEART", "ROCKET", "EYES"];
+    let valid_reactions = [
+        "THUMBS_UP",
+        "THUMBS_DOWN",
+        "LAUGH",
+        "HOORAY",
+        "CONFUSED",
+        "HEART",
+        "ROCKET",
+        "EYES",
+    ];
     if !valid_reactions.contains(&content.as_str()) {
-        return Err(CommandError::coded("invalid_reaction", &format!("invalid reaction: {}", content)));
+        return Err(CommandError::coded(
+            "invalid_reaction",
+            &format!("invalid reaction: {}", content),
+        ));
     }
 
     // Try to add the reaction first
@@ -3376,9 +3632,8 @@ async fn remove_discussion_reaction(
     let paths = AppPaths::resolve()?;
     teamai_sync::ensure_local_state(&paths)?;
     let _workspace = parse_workspace(&workspace)?;
-    let token = saved_github_token(&paths).ok_or_else(|| {
-        CommandError::coded("missing_github_token", "log in with GitHub first")
-    })?;
+    let token = saved_github_token(&paths)
+        .ok_or_else(|| CommandError::coded("missing_github_token", "log in with GitHub first"))?;
     let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
 
     #[derive(serde::Deserialize)]
@@ -3459,9 +3714,8 @@ async fn create_skill_discussion(
     let paths = AppPaths::resolve()?;
     teamai_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
-    let token = saved_github_token(&paths).ok_or_else(|| {
-        CommandError::coded("missing_github_token", "log in with GitHub first")
-    })?;
+    let token = saved_github_token(&paths)
+        .ok_or_else(|| CommandError::coded("missing_github_token", "log in with GitHub first"))?;
     let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
 
     let expected_title = format!("[skill] {}", skill_id);
@@ -3538,9 +3792,9 @@ async fn create_skill_discussion(
         .await
         .map_err(provider_command_error)?;
 
-    let repo = check_result.repository.ok_or_else(|| {
-        CommandError::coded("repo_not_found", "repository not found")
-    })?;
+    let repo = check_result
+        .repository
+        .ok_or_else(|| CommandError::coded("repo_not_found", "repository not found"))?;
 
     if !repo.has_discussions_enabled {
         return Err(CommandError::coded(
@@ -3551,13 +3805,11 @@ async fn create_skill_discussion(
 
     // Check if discussion already exists
     let title_lower = expected_title.to_lowercase();
-    if let Some(existing) = repo
-        .discussions
-        .as_ref()
-        .and_then(|conn| {
-            conn.nodes.iter().find(|d| d.title.to_lowercase() == title_lower)
-        })
-    {
+    if let Some(existing) = repo.discussions.as_ref().and_then(|conn| {
+        conn.nodes
+            .iter()
+            .find(|d| d.title.to_lowercase() == title_lower)
+    }) {
         // Already exists — return it (race condition resolved)
         return Ok(DiscussionInfo {
             id: existing.id.clone(),
@@ -3596,7 +3848,12 @@ async fn create_skill_discussion(
     // Step 3: Create the discussion
     let repo_id = repo.id;
     let skill_url = if let Some(ref path) = skill_path {
-        format!("https://github.com/{}/{}/tree/main/{}", workspace.owner, workspace.repo, path.trim_matches('/'))
+        format!(
+            "https://github.com/{}/{}/tree/main/{}",
+            workspace.owner,
+            workspace.repo,
+            path.trim_matches('/')
+        )
     } else {
         format!("https://github.com/{}/{}", workspace.owner, workspace.repo)
     };
@@ -3610,9 +3867,7 @@ async fn create_skill_discussion(
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', "\\n");
-    let escaped_title = expected_title
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"");
+    let escaped_title = expected_title.replace('\\', "\\\\").replace('"', "\\\"");
 
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -3656,7 +3911,10 @@ async fn create_skill_discussion(
         .create_discussion
         .and_then(|m| m.discussion)
         .ok_or_else(|| {
-            CommandError::coded("create_failed", "failed to create discussion — you may not have write access")
+            CommandError::coded(
+                "create_failed",
+                "failed to create discussion — you may not have write access",
+            )
         })?;
 
     Ok(DiscussionInfo {
@@ -3707,7 +3965,10 @@ async fn list_workspace_pull_requests(
     let paths = AppPaths::resolve()?;
     teamai_sync::ensure_local_state(&paths)?;
     let token = saved_github_token(&paths).ok_or_else(|| {
-        CommandError::coded("missing_github_token", "log in with GitHub before listing PRs")
+        CommandError::coded(
+            "missing_github_token",
+            "log in with GitHub before listing PRs",
+        )
     })?;
     let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
     let workspace = parse_workspace(&workspace)?;
@@ -4055,9 +4316,7 @@ async fn review_skill(request: ai_review::ReviewRequest) -> CommandResult<ai_rev
             ai_review::ReviewError::UnsupportedProvider(_) => {
                 CommandError::coded("ai_unsupported_provider", err.to_string())
             }
-            ai_review::ReviewError::Io(_) => {
-                CommandError::coded("ai_download", err.to_string())
-            }
+            ai_review::ReviewError::Io(_) => CommandError::coded("ai_download", err.to_string()),
             ai_review::ReviewError::Network(_) => {
                 CommandError::coded("ai_network", err.to_string())
             }
@@ -4108,7 +4367,10 @@ async fn review_local_skill(
             .get_skill(&skill_id)
             .map_err(|e| CommandError::coded("db_error", e.to_string()))?
             .ok_or_else(|| {
-                CommandError::coded("skill_not_found", format!("skill '{skill_id}' not in registry"))
+                CommandError::coded(
+                    "skill_not_found",
+                    format!("skill '{skill_id}' not in registry"),
+                )
             })?
     };
 
@@ -4137,7 +4399,11 @@ async fn review_local_skill(
         workspace: String::new(),
         skill_path: String::new(),
         ref_name: None,
-        skill_name: if skill.name.is_empty() { skill_id.clone() } else { skill.name.clone() },
+        skill_name: if skill.name.is_empty() {
+            skill_id.clone()
+        } else {
+            skill.name.clone()
+        },
         permissions,
     };
 
@@ -4206,14 +4472,13 @@ fn current_unix_secs() -> u64 {
 fn init_tracing() {
     use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,teamai=debug,teamai_github=debug,teamai-github=debug"));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new("info,teamai=debug,teamai_github=debug,teamai-github=debug")
+    });
 
     let log_dir = AppPaths::resolve()
         .map(|paths| paths.logs.clone())
-        .unwrap_or_else(|_| {
-            std::env::temp_dir().join("team-ai-hub").join("logs")
-        });
+        .unwrap_or_else(|_| std::env::temp_dir().join("team-ai-hub").join("logs"));
     let _ = std::fs::create_dir_all(&log_dir);
 
     let file_appender = tracing_appender::rolling::daily(&log_dir, "teamai.log");
@@ -4393,7 +4658,10 @@ pub fn run() {
     // rather than a progress bar stuck forever.
     if let Ok(count) = database.reconcile_interrupted_downloads() {
         if count > 0 {
-            tracing::info!(count, "reconciled interrupted downloads from previous session");
+            tracing::info!(
+                count,
+                "reconciled interrupted downloads from previous session"
+            );
         }
     }
 
@@ -4402,6 +4670,7 @@ pub fn run() {
         .manage(RegistryCache::default())
         .manage(Mutex::new(database))
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             let urls = args
@@ -4487,6 +4756,7 @@ pub fn run() {
             list_skill_files,
             list_workspace_branches,
             read_skill_file,
+            cache_skill_package,
             list_skill_discussions,
             get_discussion_by_number,
             get_discussion_comments,
@@ -4569,7 +4839,10 @@ mod tests {
     #[test]
     fn local_agent_roots_include_ide_agents_and_shared_skills() {
         let roots = local_agent_root_specs(Path::new("/home/demo"));
-        let paths = roots.iter().map(|root| root.path.clone()).collect::<Vec<_>>();
+        let paths = roots
+            .iter()
+            .map(|root| root.path.clone())
+            .collect::<Vec<_>>();
 
         // Use Path::ends_with (component-wise match) so this passes regardless
         // of the platform's path separator (e.g. backslashes on Windows).
@@ -4581,6 +4854,9 @@ mod tests {
 
     #[test]
     fn local_agent_directory_names_are_humanized() {
-        assert_eq!(humanize_agent_dir_name("code-reviewer_agent"), "Code Reviewer Agent");
+        assert_eq!(
+            humanize_agent_dir_name("code-reviewer_agent"),
+            "Code Reviewer Agent"
+        );
     }
 }

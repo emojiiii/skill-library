@@ -151,7 +151,6 @@ export function WorkspacesPage({
                   <SkillCard
                     key={asset.manifest.id}
                     asset={asset}
-                    selected={selected?.manifest.id === asset.manifest.id}
                     verdict={reviewVerdicts?.[asset.manifest.id]}
                     onSelect={() => {
                       onSelectAsset(asset);
@@ -196,12 +195,10 @@ export function WorkspacesPage({
 /** Card for a single skill in the grid */
 function SkillCard({
   asset,
-  selected,
   onSelect,
   verdict,
 }: {
   asset: SkillAsset;
-  selected: boolean;
   onSelect: () => void;
   verdict?: string;
 }) {
@@ -217,11 +214,7 @@ function SkillCard({
           onSelect();
         }
       }}
-      className={`group relative flex w-full cursor-pointer flex-col gap-2 rounded-[12px] border p-4 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-soft)] ${
-        selected
-          ? "border-[var(--brand)] bg-[var(--brand-soft)]"
-          : "border-[var(--line)] bg-[var(--bg-elevated)] hover:border-[var(--brand)]/50 hover:bg-[var(--bg-soft)]"
-      }`}
+      className="group relative flex w-full cursor-pointer flex-col gap-2 rounded-[12px] border border-[var(--line)] bg-[var(--bg-elevated)] p-4 text-left transition-colors hover:border-[var(--brand)]/50 hover:bg-[var(--bg-soft)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-soft)]"
     >
       {/* Reviewed-safe badge — tilted green shield in the top-left corner */}
       {verdict === "safe" ? (

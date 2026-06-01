@@ -1,5 +1,5 @@
 import { Search } from "lucide-react";
-import { Chip, Drawer } from "@heroui/react";
+import { Chip, Modal } from "@heroui/react";
 import type { ReactNode } from "react";
 import { SKILL_CATEGORIES, type RegistrySkill } from "../lib/registry";
 import { useLocale } from "../hooks/useLocale";
@@ -7,9 +7,8 @@ import { ConsumerSkillCard } from "../widgets/ConsumerSkillCard";
 
 /**
  * Consumer home: an app-store style grid of skills. Search box up top, a row of
- * category chips below it, cards below that, and a detail drawer (passed in by
- * the route) that slides in from the right when a skill is selected. No source
- * code, no Git, no workspaces.
+ * category chips below it, cards below that, and a detail modal (passed in by
+ * the route) when a skill is selected. No Git workspace management.
  */
 export function DiscoverPage({
   query,
@@ -20,7 +19,6 @@ export function DiscoverPage({
   isFeatured,
   activeCategory,
   onSelectCategory,
-  selectedId,
   onSelect,
   onInstall,
   detailPanel,
@@ -35,7 +33,6 @@ export function DiscoverPage({
   isFeatured: boolean;
   activeCategory: string | null;
   onSelectCategory: (categoryId: string | null) => void;
-  selectedId: string | null;
   onSelect: (skill: RegistrySkill) => void;
   onInstall: (skill: RegistrySkill) => void;
   detailPanel: ReactNode;
@@ -113,7 +110,6 @@ export function DiscoverPage({
                   <ConsumerSkillCard
                     key={skill.id}
                     skill={skill}
-                    selected={selectedId === skill.id}
                     onSelect={() => onSelect(skill)}
                     onInstall={() => onInstall(skill)}
                   />
@@ -129,16 +125,20 @@ export function DiscoverPage({
         </div>
       </section>
 
-      {/* Right: detail drawer (slides in when a skill is selected) */}
-      <Drawer isOpen={detailOpen} onOpenChange={onDetailOpenChange}>
-        <Drawer.Backdrop>
-          <Drawer.Content placement="right">
-            <Drawer.Dialog className="flex h-full w-[min(440px,92vw)] flex-col bg-[var(--bg-elevated)] outline-none">
+      {/* Detail modal */}
+      <Modal isOpen={detailOpen} onOpenChange={onDetailOpenChange}>
+        <Modal.Backdrop>
+          <Modal.Container>
+            {/* HeroUI size variants cap dialog width, so dimensions live inline. */}
+            <Modal.Dialog
+              className="flex flex-col overflow-hidden rounded-[16px] bg-[var(--bg-elevated)] shadow-2xl outline-none"
+              style={{ width: "min(980px, 92vw)", maxWidth: "min(980px, 92vw)", height: "min(720px, 84vh)" }}
+            >
               {detailPanel}
-            </Drawer.Dialog>
-          </Drawer.Content>
-        </Drawer.Backdrop>
-      </Drawer>
+            </Modal.Dialog>
+          </Modal.Container>
+        </Modal.Backdrop>
+      </Modal>
     </div>
   );
 }

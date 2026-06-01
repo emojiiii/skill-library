@@ -1,7 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
-import { Download } from "lucide-react";
-import { Button, Spinner, toast } from "@heroui/react";
+import { lazy, Suspense, useEffect, useState } from "react";
+import { Spinner, toast } from "@heroui/react";
 import {
   FEATURED_SKILLS,
   parseSource,
@@ -19,10 +18,10 @@ import { useAppStore } from "../state/appStore";
 import { getSkillDetailFromCache, putSkillDetailInCache } from "../lib/workspaceCache";
 import { formatError } from "../utils/format";
 import { DiscoverPage } from "../pages/DiscoverPage";
-import { SkillSafetyCard } from "../widgets/SkillSafetyCard";
 import { InstallToToolsDialog } from "../widgets/InstallToToolsDialog";
 
-const MarkdownPreview = lazy(() => import("../widgets/MarkdownPreview").then((m) => ({ default: m.MarkdownPreview })));
+// Lazy-loaded so file preview/tree code stays off the startup path.
+const DiscoverSkillDetail = lazy(() => import("../widgets/DiscoverSkillDetail").then((m) => ({ default: m.DiscoverSkillDetail })));
 
 /** Debounce a changing value by `delay` ms. */
 function useDebounced<T>(value: T, delay: number): T {
@@ -43,18 +42,18 @@ export function DiscoverRoute() {
   const [query, setQuery] = useState("");
   const [activeCategory, setActiveCategory] = useState<string | null>(null);
   const [selected, setSelected] = useState<RegistrySkill | null>(null);
-  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [detailOpen, setDetailOpen] = useState(false);
   const [installOpen, setInstallOpen] = useState(false);
 
   const debouncedQuery = useDebounced(query, 350);
 
-  // Card body click → open the detail drawer.
+  // Card body click → open the detail modal.
   const handleSelect = (skill: RegistrySkill) => {
     setSelected(skill);
-    setDrawerOpen(true);
+    setDetailOpen(true);
   };
 
-  // Hover "install" button → install directly, skipping the drawer. We still
+  // Hover "install" button → install directly, skipping the modal. We still
   // set `selected` so the detail query loads the manifest the install needs;
   // the InstallToToolsDialog stays hidden until the manifest is ready.
   const handleInstallClick = (skill: RegistrySkill) => {
@@ -157,101 +156,6 @@ export function DiscoverRoute() {
     },
   });
 
-  const skillMarkdown = detail.data?.skill_markdown?.content;
-
-  const detailPanel = useMemo(() => {
-    if (!selected) return null;
-    return (
-      <div className="flex h-full flex-col">
-        {/* Header: name, version, installs, author */}
-        <div className="border-b border-[var(--line)] px-5 py-4">
-          <div className="flex items-center gap-2">
-            <span className="text-[15px] font-semibold tracking-tight text-[var(--fg)]">
-              {selected.name}
-            </span>
-            {manifest?.version ? (
-              <span className="rounded bg-[var(--bg-soft)] px-1.5 py-0.5 text-[11px] font-mono text-[var(--fg-muted)]">
-                v{manifest.version}
-              </span>
-            ) : null}
-          </div>
-          <div className="mt-1 flex items-center gap-3 text-[11.5px] text-[var(--fg-muted)]">
-            <span>{selected.source}</span>
-            <span className="flex items-center gap-1">
-              <Download size={11} />
-              {selected.installs.toLocaleString()} {t("discover.installs")}
-            </span>
-          </div>
-          {manifest?.description ? (
-            <p className="mt-2 text-[13px] leading-[1.5] text-[var(--fg-secondary)]">
-              {manifest.description}
-            </p>
-          ) : null}
-        </div>
-
-        {/* Body: SKILL.md content or loading/error */}
-        <div className="scroll-area flex-1 px-5 py-4">
-          {detail.isLoading ? (
-            <div className="py-8 text-center text-[12px] text-[var(--fg-muted)]">
-              {t("common.loading")}
-            </div>
-          ) : skillMarkdown ? (
-            <div className="space-y-4">
-              <Suspense
-                fallback={
-                  <div className="flex justify-center py-8 text-[12px] text-[var(--fg-muted)]">
-                    <Spinner size="sm" />
-                  </div>
-                }
-              >
-                <MarkdownPreview content={skillMarkdown} compact />
-              </Suspense>
-              {/* Safety card collapsed by default */}
-              {manifest ? (
-                <details className="group">
-                  <summary className="cursor-pointer text-[12px] font-medium text-[var(--fg-muted)] hover:text-[var(--fg)]">
-                    {t("discover.safetyPermissions")}
-                  </summary>
-                  <div className="mt-2">
-                    <SkillSafetyCard manifest={manifest} />
-                  </div>
-                </details>
-              ) : null}
-            </div>
-          ) : manifest ? (
-            <div className="space-y-4">
-              {manifest.description ? (
-                <p className="text-[13px] leading-[1.6] text-[var(--fg-secondary)]">
-                  {manifest.description}
-                </p>
-              ) : null}
-              <SkillSafetyCard manifest={manifest} />
-            </div>
-          ) : (
-            <div className="rounded-md border border-[var(--warning)] bg-[var(--warning-soft)] px-3 py-2 text-[12px] text-[var(--warning)]">
-              {detail.error ? formatError(detail.error) : t("discover.detailUnavailable")}
-            </div>
-          )}
-        </div>
-
-        {/* Footer: install button */}
-        <div className="border-t border-[var(--line)] px-5 py-3">
-          <Button
-            fullWidth
-            className="h-10"
-            isDisabled={!manifest}
-            onPress={() => {
-              setInstallOpen(true);
-            }}
-          >
-            <Download size={15} />
-            {t("discover.install")}
-          </Button>
-        </div>
-      </div>
-    );
-  }, [selected, detail.isLoading, detail.error, manifest, skillMarkdown, t]);
-
   return (
     <>
       <DiscoverPage
@@ -263,13 +167,31 @@ export function DiscoverRoute() {
         isFeatured={isFeatured}
         activeCategory={activeCategory}
         onSelectCategory={handleSelectCategory}
-        selectedId={selected?.id ?? null}
         onSelect={handleSelect}
         onInstall={handleInstallClick}
-        detailPanel={detailPanel}
-        detailOpen={drawerOpen}
+        detailPanel={
+          selected ? (
+            <Suspense
+              fallback={
+                <div className="flex h-full items-center justify-center text-[12px] text-[var(--fg-muted)]">
+                  <Spinner size="sm" />
+                </div>
+              }
+            >
+              <DiscoverSkillDetail
+                selected={selected}
+                detail={detail.data}
+                loading={detail.isLoading}
+                error={detail.error}
+                installPending={install.isPending}
+                onInstallClick={() => setInstallOpen(true)}
+              />
+            </Suspense>
+          ) : null
+        }
+        detailOpen={detailOpen}
         onDetailOpenChange={(open) => {
-          setDrawerOpen(open);
+          setDetailOpen(open);
           if (!open && !installOpen) setSelected(null);
         }}
       />
@@ -279,9 +201,9 @@ export function DiscoverRoute() {
         onOpenChange={(value) => {
           setInstallOpen(value);
           if (!value) {
-            // If the drawer isn't showing this skill, drop the selection so a
+            // If the modal isn't showing this skill, drop the selection so a
             // stale detail query doesn't linger.
-            if (!drawerOpen) setSelected(null);
+            if (!detailOpen) setSelected(null);
           }
         }}
         manifest={manifest}

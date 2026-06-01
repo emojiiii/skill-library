@@ -605,6 +605,16 @@ export interface FileContent {
   isBinary: boolean;
 }
 
+export interface SkillPackageCacheResult {
+  workspace: string;
+  skillPath: string;
+  refName: string;
+  fileCount: number;
+  cachedCount: number;
+  skippedCount: number;
+  totalBytes: number;
+}
+
 /** Lists all files inside a skill directory (recursive). */
 export async function listSkillFiles(args: {
   workspace: string;
@@ -623,6 +633,26 @@ export async function readSkillFile(args: {
 }): Promise<FileContent> {
   if (!isTauri) return desktopOnly("Read skill file");
   return invoke("read_skill_file", args);
+}
+
+/** Warms the local remote cache with all files under a skill directory. */
+export async function cacheSkillPackage(args: {
+  workspace: string;
+  skillPath: string;
+  refName?: string;
+}): Promise<SkillPackageCacheResult> {
+  if (!isTauri) {
+    return {
+      workspace: args.workspace,
+      skillPath: args.skillPath,
+      refName: args.refName ?? "HEAD",
+      fileCount: 0,
+      cachedCount: 0,
+      skippedCount: 0,
+      totalBytes: 0,
+    };
+  }
+  return invoke("cache_skill_package", args);
 }
 
 // ---------------------------------------------------------------------------
@@ -844,6 +874,10 @@ export interface UnmanagedSkillInfo {
   name: string;
   path: string;
   foundIn: string[];
+  locations: Array<{
+    runtime: string;
+    path: string;
+  }>;
 }
 
 export interface SupportedRuntime {
@@ -893,6 +927,15 @@ export async function dbScanUnmanaged(): Promise<UnmanagedSkillInfo[]> {
 export async function dbImportSkill(skillId: string, sourcePath: string, linkMode?: string): Promise<ManagedSkill> {
   if (!isTauri) return desktopOnly("Import skill");
   return invoke("db_import_skill", { skillId, sourcePath, linkMode });
+}
+
+/** Open the native directory picker for choosing a skill folder. */
+export async function selectSkillDirectory(): Promise<string | null> {
+  if (!isTauri) return desktopOnly("Choose skill folder");
+  const selected = await invoke<string | string[] | null>("plugin:dialog|open", {
+    options: { directory: true, multiple: false },
+  });
+  return Array.isArray(selected) ? (selected[0] ?? null) : selected;
 }
 
 export interface SkillDownloadProgress {

@@ -19,12 +19,10 @@ export function ConsumerSkillCard({
   skill,
   onSelect,
   onInstall,
-  selected,
 }: {
   skill: RegistrySkill;
   onSelect: () => void;
   onInstall: () => void;
-  selected?: boolean;
 }) {
   const { t } = useLocale();
 
@@ -41,11 +39,7 @@ export function ConsumerSkillCard({
       tabIndex={0}
       onClick={onSelect}
       onKeyDown={handleKeyDown}
-      className={`group relative flex w-full cursor-pointer flex-col gap-2 rounded-[12px] border p-4 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-soft)] ${
-        selected
-          ? "border-[var(--brand)] bg-[var(--brand-soft)]"
-          : "border-[var(--line)] bg-[var(--bg-elevated)] hover:border-[var(--brand)]/50 hover:bg-[var(--bg-soft)]"
-      }`}
+      className="group relative flex w-full cursor-pointer flex-col gap-2 rounded-[12px] border border-[var(--line)] bg-[var(--bg-elevated)] p-4 text-left transition-colors hover:border-[var(--brand)]/50 hover:bg-[var(--bg-soft)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-soft)]"
     >
       <div className="flex items-start justify-between gap-2">
         <div className="flex min-w-0 items-center gap-1.5">
@@ -66,7 +60,7 @@ export function ConsumerSkillCard({
       </div>
 
       {/* Hover overlay: View (opens drawer) + Install (direct) */}
-      <div className="pointer-events-none absolute inset-0 grid place-items-center gap-2 rounded-[12px] bg-[var(--bg-elevated)]/60 opacity-0 backdrop-blur-[1px] transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100">
+      <div className="pointer-events-none absolute inset-0 grid place-items-center gap-2 rounded-[12px] bg-[var(--bg-elevated)]/60 opacity-0 backdrop-blur-[1px] transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100 focus-within:opacity-100">
         <div className="flex items-center gap-2">
           <button
             type="button"

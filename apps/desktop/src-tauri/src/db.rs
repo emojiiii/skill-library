@@ -1,7 +1,7 @@
-use rusqlite::{Connection, params};
-use std::path::{Path, PathBuf};
+use rusqlite::{params, Connection};
+use sha2::{Digest, Sha256};
 use std::fs;
-use sha2::{Sha256, Digest};
+use std::path::{Path, PathBuf};
 
 const SCHEMA_VERSION: u32 = 3;
 
@@ -13,21 +13,81 @@ pub struct RuntimeInfo {
 }
 
 pub const SUPPORTED_RUNTIMES: &[RuntimeInfo] = &[
-    RuntimeInfo { id: "claude-code", label: "Claude Code", global_path: ".claude/skills" },
-    RuntimeInfo { id: "cursor", label: "Cursor", global_path: ".cursor/skills" },
-    RuntimeInfo { id: "codex", label: "Codex", global_path: ".codex/skills" },
-    RuntimeInfo { id: "gemini-cli", label: "Gemini CLI", global_path: ".gemini/skills" },
-    RuntimeInfo { id: "github-copilot", label: "GitHub Copilot", global_path: ".copilot/skills" },
-    RuntimeInfo { id: "windsurf", label: "Windsurf", global_path: ".codeium/windsurf/skills" },
-    RuntimeInfo { id: "opencode", label: "OpenCode", global_path: ".config/opencode/skills" },
-    RuntimeInfo { id: "kiro-cli", label: "Kiro CLI", global_path: ".kiro/skills" },
-    RuntimeInfo { id: "roo", label: "Roo Code", global_path: ".roo/skills" },
-    RuntimeInfo { id: "continue", label: "Continue", global_path: ".continue/skills" },
-    RuntimeInfo { id: "hermes-agent", label: "Hermes Agent", global_path: ".hermes/skills" },
-    RuntimeInfo { id: "trae", label: "Trae", global_path: ".trae/skills" },
-    RuntimeInfo { id: "cline", label: "Cline", global_path: ".agents/skills" },
-    RuntimeInfo { id: "goose", label: "Goose", global_path: ".config/goose/skills" },
-    RuntimeInfo { id: "devin", label: "Devin", global_path: ".config/devin/skills" },
+    RuntimeInfo {
+        id: "claude-code",
+        label: "Claude Code",
+        global_path: ".claude/skills",
+    },
+    RuntimeInfo {
+        id: "cursor",
+        label: "Cursor",
+        global_path: ".cursor/skills",
+    },
+    RuntimeInfo {
+        id: "codex",
+        label: "Codex",
+        global_path: ".codex/skills",
+    },
+    RuntimeInfo {
+        id: "gemini-cli",
+        label: "Gemini CLI",
+        global_path: ".gemini/skills",
+    },
+    RuntimeInfo {
+        id: "github-copilot",
+        label: "GitHub Copilot",
+        global_path: ".copilot/skills",
+    },
+    RuntimeInfo {
+        id: "windsurf",
+        label: "Windsurf",
+        global_path: ".codeium/windsurf/skills",
+    },
+    RuntimeInfo {
+        id: "opencode",
+        label: "OpenCode",
+        global_path: ".config/opencode/skills",
+    },
+    RuntimeInfo {
+        id: "kiro-cli",
+        label: "Kiro CLI",
+        global_path: ".kiro/skills",
+    },
+    RuntimeInfo {
+        id: "roo",
+        label: "Roo Code",
+        global_path: ".roo/skills",
+    },
+    RuntimeInfo {
+        id: "continue",
+        label: "Continue",
+        global_path: ".continue/skills",
+    },
+    RuntimeInfo {
+        id: "hermes-agent",
+        label: "Hermes Agent",
+        global_path: ".hermes/skills",
+    },
+    RuntimeInfo {
+        id: "trae",
+        label: "Trae",
+        global_path: ".trae/skills",
+    },
+    RuntimeInfo {
+        id: "cline",
+        label: "Cline",
+        global_path: ".agents/skills",
+    },
+    RuntimeInfo {
+        id: "goose",
+        label: "Goose",
+        global_path: ".config/goose/skills",
+    },
+    RuntimeInfo {
+        id: "devin",
+        label: "Devin",
+        global_path: ".config/devin/skills",
+    },
 ];
 
 pub struct Database {
@@ -48,7 +108,8 @@ impl Database {
     }
 
     fn migrate(&self) -> rusqlite::Result<()> {
-        let version: u32 = self.conn
+        let version: u32 = self
+            .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap_or(0);
 
@@ -226,14 +287,15 @@ impl Database {
         &self,
         id: &str,
         version: &str,
+        source_branch: &str,
         local_path: &str,
         baseline_hash: &str,
     ) -> rusqlite::Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
         let mtime = collect_mtime_fingerprint(Path::new(local_path));
         self.conn.execute(
-            "UPDATE skills SET version = ?1, local_path = ?2, baseline_hash = ?3, published_hash = ?3, mtime_fingerprint = ?4, is_modified = 0, install_status = 'installed', download_progress = 100, download_error = '', updated_at = ?5 WHERE id = ?6",
-            params![version, local_path, baseline_hash, &mtime, &now, id],
+            "UPDATE skills SET version = ?1, source_branch = ?2, local_path = ?3, baseline_hash = ?4, published_hash = ?4, mtime_fingerprint = ?5, is_modified = 0, install_status = 'installed', download_progress = 100, download_error = '', updated_at = ?6 WHERE id = ?7",
+            params![version, source_branch, local_path, baseline_hash, &mtime, &now, id],
         )?;
         Ok(())
     }
@@ -363,7 +425,8 @@ impl Database {
     }
 
     pub fn remove_skill(&self, id: &str) -> rusqlite::Result<()> {
-        self.conn.execute("DELETE FROM skills WHERE id = ?1", params![id])?;
+        self.conn
+            .execute("DELETE FROM skills WHERE id = ?1", params![id])?;
         Ok(())
     }
 
@@ -371,7 +434,13 @@ impl Database {
     // Skill targets (runtime enable/disable)
     // -------------------------------------------------------------------------
 
-    pub fn set_target_enabled(&self, skill_id: &str, runtime: &str, enabled: bool, target_path: &str) -> rusqlite::Result<()> {
+    pub fn set_target_enabled(
+        &self,
+        skill_id: &str,
+        runtime: &str,
+        enabled: bool,
+        target_path: &str,
+    ) -> rusqlite::Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO skill_targets (skill_id, runtime, enabled, target_path) VALUES (?1, ?2, ?3, ?4)",
             params![skill_id, runtime, enabled as i32, target_path],
@@ -381,7 +450,7 @@ impl Database {
 
     pub fn get_targets_for_skill(&self, skill_id: &str) -> rusqlite::Result<Vec<SkillTargetRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT skill_id, runtime, enabled, target_path FROM skill_targets WHERE skill_id = ?1"
+            "SELECT skill_id, runtime, enabled, target_path FROM skill_targets WHERE skill_id = ?1",
         )?;
         let rows = stmt.query_map(params![skill_id], |row| {
             Ok(SkillTargetRow {
@@ -414,7 +483,9 @@ impl Database {
     // -------------------------------------------------------------------------
 
     pub fn get_cache(&self, key: &str) -> rusqlite::Result<Option<Vec<u8>>> {
-        let mut stmt = self.conn.prepare("SELECT data FROM cache_entries WHERE key = ?1")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT data FROM cache_entries WHERE key = ?1")?;
         let mut rows = stmt.query_map(params![key], |row| row.get::<_, Vec<u8>>(0))?;
         match rows.next() {
             Some(data) => Ok(Some(data?)),
@@ -423,7 +494,9 @@ impl Database {
     }
 
     pub fn get_cache_many(&self, keys: &[String]) -> rusqlite::Result<Vec<Option<Vec<u8>>>> {
-        let mut stmt = self.conn.prepare("SELECT data FROM cache_entries WHERE key = ?1")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT data FROM cache_entries WHERE key = ?1")?;
         keys.iter()
             .map(|key| {
                 let mut rows = stmt.query_map(params![key], |row| row.get::<_, Vec<u8>>(0))?;
@@ -445,7 +518,10 @@ impl Database {
     }
 
     pub fn clear_cache_for_workspace(&self, workspace: &str) -> rusqlite::Result<()> {
-        self.conn.execute("DELETE FROM cache_entries WHERE workspace = ?1", params![workspace])?;
+        self.conn.execute(
+            "DELETE FROM cache_entries WHERE workspace = ?1",
+            params![workspace],
+        )?;
         Ok(())
     }
 
@@ -455,7 +531,8 @@ impl Database {
     }
 
     pub fn delete_cache(&self, key: &str) -> rusqlite::Result<()> {
-        self.conn.execute("DELETE FROM cache_entries WHERE key = ?1", params![key])?;
+        self.conn
+            .execute("DELETE FROM cache_entries WHERE key = ?1", params![key])?;
         Ok(())
     }
 
@@ -539,16 +616,29 @@ pub fn collect_mtime_fingerprint(dir: &Path) -> String {
         let Ok(read) = fs::read_dir(dir) else { return };
         for entry in read.flatten() {
             let path = entry.path();
-            if path.file_name().map(|n| n.to_string_lossy().starts_with('.')).unwrap_or(false) {
+            if path
+                .file_name()
+                .map(|n| n.to_string_lossy().starts_with('.'))
+                .unwrap_or(false)
+            {
                 continue;
             }
             if path.is_dir() {
                 walk(&path, base, out);
             } else {
-                let rel = path.strip_prefix(base).unwrap_or(&path).to_string_lossy().to_string();
-                let mtime = path.metadata()
+                let rel = path
+                    .strip_prefix(base)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .to_string();
+                let mtime = path
+                    .metadata()
                     .and_then(|m| m.modified())
-                    .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs())
+                    .map(|t| {
+                        t.duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs()
+                    })
                     .unwrap_or(0);
                 out.push((rel, mtime));
             }
@@ -557,7 +647,11 @@ pub fn collect_mtime_fingerprint(dir: &Path) -> String {
 
     walk(dir, dir, &mut entries);
     entries.sort_by(|a, b| a.0.cmp(&b.0));
-    entries.iter().map(|(p, t)| format!("{p}:{t}")).collect::<Vec<_>>().join("\n")
+    entries
+        .iter()
+        .map(|(p, t)| format!("{p}:{t}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Compute a SHA-256 hash of all files in a directory (sorted by path for determinism).
@@ -570,7 +664,11 @@ pub fn compute_dir_hash(dir: &Path) -> String {
         let Ok(read) = fs::read_dir(dir) else { return };
         for entry in read.flatten() {
             let path = entry.path();
-            if path.file_name().map(|n| n.to_string_lossy().starts_with('.')).unwrap_or(false) {
+            if path
+                .file_name()
+                .map(|n| n.to_string_lossy().starts_with('.'))
+                .unwrap_or(false)
+            {
                 continue;
             }
             if path.is_dir() {
@@ -610,7 +708,8 @@ impl Database {
 
         // Step 1: Quick mtime check
         let current_mtime = collect_mtime_fingerprint(Path::new(local_path));
-        let stored_mtime: Option<String> = self.conn
+        let stored_mtime: Option<String> = self
+            .conn
             .query_row(
                 "SELECT mtime_fingerprint FROM skills WHERE id = ?1",
                 params![id],
@@ -686,8 +785,12 @@ impl Database {
         let skill = self.get_skill(id)?;
         if let Some(ref s) = skill {
             // Get all targets so caller can restore symlinks to real copies
-            let _ = self.conn.execute("DELETE FROM skill_targets WHERE skill_id = ?1", params![id]);
-            let _ = self.conn.execute("DELETE FROM skills WHERE id = ?1", params![id]);
+            let _ = self
+                .conn
+                .execute("DELETE FROM skill_targets WHERE skill_id = ?1", params![id]);
+            let _ = self
+                .conn
+                .execute("DELETE FROM skills WHERE id = ?1", params![id]);
             // Note: caller is responsible for filesystem operations (replace symlinks with copies)
         }
         Ok(skill)
@@ -695,10 +798,7 @@ impl Database {
 
     /// Bump version string (semver-like).
     pub fn bump_version(current: &str, bump_type: &str) -> String {
-        let parts: Vec<u32> = current
-            .split('.')
-            .filter_map(|s| s.parse().ok())
-            .collect();
+        let parts: Vec<u32> = current.split('.').filter_map(|s| s.parse().ok()).collect();
         let (major, minor, patch) = match parts.as_slice() {
             [a, b, c, ..] => (*a, *b, *c),
             [a, b] => (*a, *b, 0),
@@ -796,20 +896,27 @@ pub fn scan_unmanaged_skills(home: &Path, db: &Database) -> Vec<UnmanagedSkill> 
         .map(|s| s.id)
         .collect();
 
-    let mut found: std::collections::HashMap<String, UnmanagedSkill> = std::collections::HashMap::new();
+    let mut found: std::collections::HashMap<String, UnmanagedSkill> =
+        std::collections::HashMap::new();
 
     for runtime in SUPPORTED_RUNTIMES {
         let dir = home.join(runtime.global_path);
         if !dir.is_dir() {
             continue;
         }
-        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             if !path.is_dir() {
                 continue;
             }
-            let id = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let id = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
             if id.starts_with('.') || managed_ids.contains(&id) {
                 continue;
             }
@@ -818,8 +925,13 @@ pub fn scan_unmanaged_skills(home: &Path, db: &Database) -> Vec<UnmanagedSkill> 
                 name: humanize_name(&id),
                 path: path.clone(),
                 found_in: Vec::new(),
+                locations: Vec::new(),
             });
             skill.found_in.push(runtime.id.to_owned());
+            skill.locations.push(UnmanagedSkillLocation {
+                runtime: runtime.id.to_owned(),
+                path,
+            });
         }
     }
 
@@ -834,9 +946,16 @@ pub struct UnmanagedSkill {
     pub name: String,
     pub path: PathBuf,
     pub found_in: Vec<String>,
+    pub locations: Vec<UnmanagedSkillLocation>,
 }
 
-fn humanize_name(id: &str) -> String {
+#[derive(Debug, Clone)]
+pub struct UnmanagedSkillLocation {
+    pub runtime: String,
+    pub path: PathBuf,
+}
+
+pub fn humanize_name(id: &str) -> String {
     id.split(['-', '_'])
         .filter(|s| !s.is_empty())
         .map(|s| {

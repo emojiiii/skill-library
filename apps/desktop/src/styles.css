@@ -898,6 +898,146 @@ a[class*="text-white"] {
   line-height: 1.5;
 }
 
+/* ---------- Discover skill detail ---------- */
+.discover-file-tree .skill-file-tree {
+  gap: 2px;
+}
+
+.discover-file-tree .skill-file-tree__dir,
+.discover-file-tree .skill-file-tree__file {
+  min-height: 28px;
+  border-radius: 7px;
+  padding-top: 5px;
+  padding-bottom: 5px;
+}
+
+.discover-file-tree .skill-file-tree__file.is-selected {
+  background: color-mix(in srgb, var(--brand-soft) 72%, transparent);
+  color: var(--brand);
+}
+
+.discover-markdown {
+  color: var(--fg-secondary);
+  font-size: 13.5px;
+  line-height: 1.72;
+}
+
+.discover-markdown > *:first-child {
+  margin-top: 0;
+}
+
+.discover-markdown > *:last-child {
+  margin-bottom: 0;
+}
+
+.discover-markdown h1,
+.discover-markdown h2,
+.discover-markdown h3 {
+  color: var(--fg);
+  font-weight: 650;
+  line-height: 1.22;
+  letter-spacing: 0;
+}
+
+.discover-markdown h1 {
+  margin: 0 0 14px;
+  font-size: 24px;
+}
+
+.discover-markdown h2 {
+  margin: 28px 0 10px;
+  font-size: 18px;
+}
+
+.discover-markdown h3 {
+  margin: 22px 0 8px;
+  font-size: 15px;
+}
+
+.discover-markdown p {
+  margin: 0 0 12px;
+}
+
+.discover-markdown ul,
+.discover-markdown ol {
+  margin: 8px 0 14px;
+  padding-left: 24px;
+}
+
+.discover-markdown li {
+  margin: 4px 0;
+}
+
+.discover-markdown a {
+  color: var(--brand);
+  text-decoration: none;
+}
+
+.discover-markdown a:hover {
+  text-decoration: underline;
+}
+
+.discover-markdown code {
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--bg-soft);
+  padding: 1px 5px;
+  color: var(--fg);
+  font-family: "SFMono-Regular", "JetBrains Mono", ui-monospace, monospace;
+  font-size: 12px;
+}
+
+.discover-markdown pre {
+  margin: 14px 0 18px;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--bg-elevated);
+  padding: 14px 16px;
+}
+
+.discover-markdown pre code {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--fg);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.discover-markdown blockquote {
+  margin: 14px 0;
+  border-left: 3px solid var(--brand);
+  padding: 2px 0 2px 14px;
+  color: var(--fg-muted);
+}
+
+.discover-markdown hr {
+  margin: 22px 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+
+.discover-markdown table {
+  width: 100%;
+  margin: 14px 0;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.discover-markdown th,
+.discover-markdown td {
+  border: 1px solid var(--line);
+  padding: 7px 10px;
+  text-align: left;
+}
+
+.discover-markdown th {
+  background: var(--bg-soft);
+  color: var(--fg);
+  font-weight: 600;
+}
+
 /* ---------- Skill cards (grid) ---------- */
 .skill-grid {
   display: grid;

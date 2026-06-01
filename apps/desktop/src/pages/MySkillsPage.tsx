@@ -1,6 +1,6 @@
-import { Button, Modal, ProgressBar, Spinner, Switch, Tooltip, toast } from "@heroui/react";
+import { Button, cn, Modal, ProgressBar, Spinner, Switch, Tooltip, toast } from "@heroui/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, ChevronDown, Download, GitPullRequestArrow, Package, PackageOpen, RefreshCw, RotateCcw, ShieldAlert, ShieldCheck, Trash2 } from "lucide-react";
+import { AlertTriangle, ChevronDown, Download, FolderOpen, GitPullRequestArrow, Package, PackageOpen, RefreshCw, RotateCcw, ShieldAlert, ShieldCheck, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import {
   type AiReviewResult,
@@ -15,6 +15,7 @@ import {
   type ManagedSkill,
   onSkillDownloadProgress,
   reviewLocalSkill,
+  selectSkillDirectory,
   syncNow,
   type UnmanagedSkillInfo,
 } from "../lib/teamai";
@@ -45,6 +46,8 @@ const SEVERITY_TONE: Record<string, PillTone> = {
   danger: "danger",
 };
 
+const EMPTY_IMPORT_GROUPS: Record<string, boolean> = {};
+
 /**
  * "My skills" — the single home for skills installed on this machine. Merges
  * what used to be two screens (consumer "My skills" + power-user "Local"):
@@ -60,6 +63,11 @@ export function MySkillsPage() {
   const { t, locale } = useLocale();
   const queryClient = useQueryClient();
   const [showImport, setShowImport] = useState(false);
+  const [customSkillPath, setCustomSkillPath] = useState("");
+  const [openImportGroups, setOpenImportGroups] = useLocalStorage<Record<string, boolean>>(
+    "my-skills:import-groups",
+    EMPTY_IMPORT_GROUPS,
+  );
 
   // Push-to-workspace uses the global PushModal (lives in RootLayout).
   const setPushEntry = useAppStore((s) => s.setPushEntry);
@@ -126,9 +134,11 @@ export function MySkillsPage() {
   const importSkill = useMutation({
     mutationFn: (a: { skillId: string; sourcePath: string }) => dbImportSkill(a.skillId, a.sourcePath),
     onSuccess: () => {
+      setCustomSkillPath("");
       queryClient.invalidateQueries({ queryKey: ["db-skills"] });
       queryClient.invalidateQueries({ queryKey: ["db-unmanaged"] });
     },
+    onError: (err) => toast.danger(String((err as { message?: string })?.message ?? err)),
   });
   // Retry a failed/interrupted download. The 'error' row carries the source
   // workspace + in-repo path it was first downloaded from, so we can re-trigger
@@ -172,6 +182,17 @@ export function MySkillsPage() {
   const list = skills.data ?? [];
   const tools = (runtimes.data ?? []).filter((r) => r.exists);
   const totalEnabled = list.reduce((sum, s) => sum + s.targets.filter((tg) => tg.enabled).length, 0);
+  const runtimeMetaById = useMemo(() => {
+    const map = new Map<string, { label: string; globalPath: string; exists: boolean }>();
+    for (const runtime of runtimes.data ?? []) {
+      map.set(runtime.id, {
+        label: runtime.label,
+        globalPath: runtime.globalPath,
+        exists: runtime.exists,
+      });
+    }
+    return map;
+  }, [runtimes.data]);
 
   const busyRuntimeKey = enable.isPending
     ? `${enable.variables?.skillId}:${enable.variables?.runtime}`
@@ -182,16 +203,45 @@ export function MySkillsPage() {
   // Group unmanaged skills by source runtime for the import modal.
   const groupedUnmanaged = useMemo(() => {
     const items = unmanaged.data ?? [];
-    const groups = new Map<string, UnmanagedSkillInfo[]>();
+    const groups = new Map<
+      string,
+      {
+        runtime: string;
+        label: string;
+        globalPath: string;
+        items: Array<UnmanagedSkillInfo & { sourcePath: string }>;
+      }
+    >();
     for (const skill of items) {
-      for (const runtime of skill.foundIn) {
-        const arr = groups.get(runtime) ?? [];
-        arr.push(skill);
-        groups.set(runtime, arr);
+      const locations = skill.locations?.length
+        ? skill.locations
+        : skill.foundIn.map((runtime) => ({ runtime, path: skill.path }));
+      for (const location of locations) {
+        const runtime = location.runtime;
+        const meta = runtimeMetaById.get(runtime);
+        const group = groups.get(runtime) ?? {
+          runtime,
+          label: meta?.label ?? TOOL_LABELS[runtime] ?? runtime,
+          globalPath: meta?.globalPath ?? "",
+          items: [],
+        };
+        group.items.push({ ...skill, sourcePath: location.path });
+        groups.set(runtime, group);
       }
     }
-    return [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-  }, [unmanaged.data]);
+    return [...groups.values()].sort((a, b) => a.label.localeCompare(b.label));
+  }, [runtimeMetaById, unmanaged.data]);
+
+  const handleChooseSkillFolder = async () => {
+    try {
+      const selected = await selectSkillDirectory();
+      if (selected) setCustomSkillPath(selected);
+    } catch (err) {
+      toast.danger(String((err as { message?: string })?.message ?? err));
+    }
+  };
+
+  const customImportPending = importSkill.isPending && importSkill.variables?.skillId === "";
 
   return (
     <section className="scroll-area min-h-0 flex-1">
@@ -240,62 +290,133 @@ export function MySkillsPage() {
                   <p className="mt-1 text-[12px] text-[var(--fg-muted)]">{t("local.unmanaged.desc")}</p>
                 </Modal.Header>
 
-                <Modal.Body className="max-h-[60vh] overflow-y-auto px-5 py-4">
+                <Modal.Body className="max-h-[66vh] overflow-y-auto px-5 py-4">
+                  <div className="mb-4 rounded-lg border border-[var(--line)] bg-[var(--bg)] p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 text-[13px] font-medium text-[var(--fg)]">
+                          <FolderOpen size={15} className="text-[var(--fg-muted)]" />
+                          {t("local.importCustom")}
+                        </div>
+                        <div className="mt-1 text-[11.5px] leading-[1.5] text-[var(--fg-muted)]">
+                          {t("local.projectSkillHint")}
+                        </div>
+                      </div>
+                      <Button size="sm" variant="outline" onPress={handleChooseSkillFolder}>
+                        <FolderOpen size={13} />
+                        {t("local.chooseFolder")}
+                      </Button>
+                    </div>
+                    <div className="mt-3 flex items-center gap-2">
+                      <input
+                        value={customSkillPath}
+                        onChange={(event) => setCustomSkillPath(event.target.value)}
+                        placeholder={t("local.folderPathPlaceholder")}
+                        className="min-w-0 flex-1 rounded-md border border-[var(--line)] bg-[var(--bg-elevated)] px-3 py-2 font-mono text-[12px] outline-none focus:border-[var(--brand)] focus:ring-2 focus:ring-[var(--brand-soft)]"
+                      />
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        isDisabled={!customSkillPath.trim()}
+                        isPending={customImportPending}
+                        onPress={() => importSkill.mutate({ skillId: "", sourcePath: customSkillPath.trim() })}
+                      >
+                        <Download size={12} />
+                        {t("local.importSelectedFolder")}
+                      </Button>
+                    </div>
+                  </div>
+
                   {unmanaged.isFetching && !groupedUnmanaged.length ? (
                     <div className="flex items-center justify-center py-8">
                       <Pill>{t("local.scanning")}</Pill>
                     </div>
                   ) : groupedUnmanaged.length ? (
-                    <div className="overflow-hidden rounded-md border border-[var(--line)]">
-                      {groupedUnmanaged.map(([runtime, items]) => (
-                        <div key={runtime}>
-                          <div className="sticky top-0 z-10 flex items-center justify-between border-b border-[var(--line)] bg-[var(--bg-soft)] px-4 py-2">
-                            <div className="flex items-center gap-2">
-                              <span className="text-[11px] font-semibold uppercase tracking-wide text-[var(--fg-muted)]">
-                                {runtime}
-                              </span>
-                              <span className="text-[11px] text-[var(--fg-muted)]">({items.length})</span>
-                            </div>
-                            <Button
-                              size="sm"
-                              variant="secondary"
-                              onPress={() => {
-                                for (const skill of items) {
-                                  importSkill.mutate({ skillId: skill.id, sourcePath: skill.path });
+                    <div className="space-y-2">
+                      {groupedUnmanaged.map((group) => {
+                        const open = openImportGroups[group.runtime] ?? true;
+                        return (
+                          <section
+                            key={group.runtime}
+                            className="overflow-hidden rounded-lg border border-[var(--line)] bg-[var(--bg-elevated)]"
+                          >
+                            <div className="flex items-center gap-2 border-b border-[var(--line)] bg-[var(--bg-soft)] px-3 py-2">
+                              <button
+                                type="button"
+                                className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                                onClick={() =>
+                                  setOpenImportGroups((prev) => ({
+                                    ...prev,
+                                    [group.runtime]: !(prev[group.runtime] ?? true),
+                                  }))
                                 }
-                              }}
-                            >
-                              <Download size={12} />
-                              {t("local.importAll")}
-                            </Button>
-                          </div>
-                          {items.map((skill) => (
-                            <div
-                              key={`${runtime}-${skill.id}`}
-                              className="flex items-center justify-between gap-3 border-b border-[var(--line)] px-4 py-3 last:border-b-0 hover:bg-[var(--bg-soft)]"
-                            >
-                              <div className="min-w-0 flex-1">
-                                <div className="flex items-center gap-2">
-                                  <Package size={14} className="shrink-0 text-[var(--fg-muted)]" />
-                                  <span className="truncate text-[13px] font-medium">{skill.name}</span>
+                              >
+                                <ChevronDown
+                                  size={14}
+                                  className={cn("shrink-0 text-[var(--fg-muted)] transition-transform", !open && "-rotate-90")}
+                                />
+                                <div className="min-w-0">
+                                  <div className="flex items-center gap-2">
+                                    <span className="truncate text-[12.5px] font-semibold text-[var(--fg)]">
+                                      {group.label}
+                                    </span>
+                                    <Pill>{group.items.length}</Pill>
+                                  </div>
+                                  <div className="mt-0.5 truncate font-mono text-[10.5px] text-[var(--fg-muted)]">
+                                    {group.globalPath}
+                                  </div>
                                 </div>
-                                <div className="mt-0.5 truncate font-mono text-[11px] text-[var(--fg-muted)]">
-                                  {skill.id}
-                                </div>
-                              </div>
+                              </button>
                               <Button
                                 size="sm"
                                 variant="secondary"
-                                onPress={() => importSkill.mutate({ skillId: skill.id, sourcePath: skill.path })}
-                                isPending={importSkill.isPending && importSkill.variables?.skillId === skill.id}
+                                onPress={() => {
+                                  for (const skill of group.items) {
+                                    importSkill.mutate({ skillId: skill.id, sourcePath: skill.sourcePath });
+                                  }
+                                }}
                               >
                                 <Download size={12} />
-                                {t("local.import")}
+                                {t("local.importAll")}
                               </Button>
                             </div>
-                          ))}
-                        </div>
-                      ))}
+
+                            {open ? (
+                              <div>
+                                {group.items.map((skill) => (
+                                  <div
+                                    key={`${group.runtime}-${skill.id}-${skill.sourcePath}`}
+                                    className="flex items-center justify-between gap-3 border-b border-[var(--line)] px-3 py-3 last:border-b-0 hover:bg-[var(--bg-soft)]"
+                                  >
+                                    <div className="min-w-0 flex-1">
+                                      <div className="flex items-center gap-2">
+                                        <Package size={14} className="shrink-0 text-[var(--fg-muted)]" />
+                                        <span className="truncate text-[13px] font-medium">{skill.name}</span>
+                                      </div>
+                                      <div className="mt-0.5 truncate font-mono text-[11px] text-[var(--fg-muted)]">
+                                        {skill.sourcePath}
+                                      </div>
+                                    </div>
+                                    <Button
+                                      size="sm"
+                                      variant="secondary"
+                                      onPress={() => importSkill.mutate({ skillId: skill.id, sourcePath: skill.sourcePath })}
+                                      isPending={
+                                        importSkill.isPending &&
+                                        importSkill.variables?.skillId === skill.id &&
+                                        importSkill.variables?.sourcePath === skill.sourcePath
+                                      }
+                                    >
+                                      <Download size={12} />
+                                      {t("local.import")}
+                                    </Button>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : null}
+                          </section>
+                        );
+                      })}
                     </div>
                   ) : (
                     <div className="flex items-center justify-center py-8 text-[12px] text-[var(--fg-muted)]">

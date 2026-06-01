@@ -22,6 +22,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tauri-plugin-deep-link = "2.4.9"
+tauri-plugin-dialog = "2.4.2"
 tauri-plugin-opener = "2.5.2"
 tauri-plugin-single-instance = { version = "2.4.2", features = ["deep-link"] }
 tauri = { version = "2", features = [] }

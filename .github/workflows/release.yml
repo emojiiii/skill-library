@@ -513,7 +513,7 @@ jobs:
     if: ${{ always() && needs.build-desktop.result == 'success' && needs.publish-release.result == 'success' }}
     steps:
       - name: Keep last three release versions and artifact runs
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const keepReleases = 3;

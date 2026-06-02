@@ -6,7 +6,7 @@
 
 ## 1. 设计目标
 
-Skill manifest 是 Team AI Hub 识别、展示、订阅、同步和安装 Skill 的最小元数据契约。
+Skill manifest 是 Skill Library 识别、展示、订阅、同步和安装 Skill 的最小元数据契约。
 
 MVP 采用 **"必填最小集 + 可选扩展字段"**：
 

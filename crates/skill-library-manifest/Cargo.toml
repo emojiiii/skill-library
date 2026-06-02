@@ -1,0 +1,15 @@
+[package]
+name = "skill-library-manifest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+skill-library-core = { path = "../skill-library-core" }
+tempfile.workspace = true
+thiserror.workspace = true
+walkdir.workspace = true

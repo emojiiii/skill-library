@@ -4,6 +4,23 @@ mod db;
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
+use skill_library_core::{AppPaths, GitHubCredential, WorkspaceRef};
+use skill_library_installer::{InstallMetadata, InstallOptions, InstallReport, TargetRoot};
+use skill_library_manifest::{effective_risk, SemanticChange, SkillAsset};
+use skill_library_provider::{
+    ChangedFile, GitRef, Invitation, InvitationInput, Member, PageOpts, PermissionLevel, Provider,
+    Workspace,
+};
+use skill_library_provider_github::{
+    scan::{SkillDetailScan, WorkspaceDetailScan},
+    CommitSummary, GitHubProvider, GitHubPublishFile, GitHubPublishInput, IssueComment,
+    PullRequestQueryState, PullRequestSummary, RepositoryEvent, RepositoryInvitation,
+};
+use skill_library_publish::{PublishPackage, PublishPolicyResult, PublishRequestSummary};
+use skill_library_sync::{
+    RemoteWorkspaceSkills, StoredWorkspace, Subscription, SubscriptionsFile, SyncOptions,
+    SyncReport, TargetSelection, WorkspaceWebhookRegistration, WorkspacesFile,
+};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -12,26 +29,9 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
 use tauri_plugin_opener::OpenerExt;
-use teamai_core::{AppPaths, GitHubCredential, WorkspaceRef};
-use teamai_installer::{InstallMetadata, InstallOptions, InstallReport, TargetRoot};
-use teamai_manifest::{effective_risk, SemanticChange, SkillAsset};
-use teamai_provider::{
-    ChangedFile, GitRef, Invitation, InvitationInput, Member, PageOpts, PermissionLevel, Provider,
-    Workspace,
-};
-use teamai_provider_github::{
-    scan::{SkillDetailScan, WorkspaceDetailScan},
-    CommitSummary, GitHubProvider, GitHubPublishFile, GitHubPublishInput, IssueComment,
-    PullRequestQueryState, PullRequestSummary, RepositoryEvent, RepositoryInvitation,
-};
-use teamai_publish::{PublishPackage, PublishPolicyResult, PublishRequestSummary};
-use teamai_sync::{
-    RemoteWorkspaceSkills, StoredWorkspace, Subscription, SubscriptionsFile, SyncOptions,
-    SyncReport, TargetSelection, WorkspaceWebhookRegistration, WorkspacesFile,
-};
 use url::Url;
 
-const DEEP_LINK_EVENT: &str = "teamai://deep-link";
+const DEEP_LINK_EVENT: &str = "skill-library://deep-link";
 const DEEP_LINK_SUBSCRIBE_PATH: &str = "subscribe";
 const GITHUB_DEVICE_SCOPES: &[&str] = &["repo", "read:org", "read:user"];
 
@@ -98,37 +98,37 @@ impl serde::Serialize for CommandError {
     }
 }
 
-impl From<teamai_core::TeamAIError> for CommandError {
-    fn from(value: teamai_core::TeamAIError) -> Self {
+impl From<skill_library_core::SkillLibraryError> for CommandError {
+    fn from(value: skill_library_core::SkillLibraryError) -> Self {
         Self::coded("core_error", value.to_string())
     }
 }
 
-impl From<teamai_manifest::ManifestError> for CommandError {
-    fn from(value: teamai_manifest::ManifestError) -> Self {
+impl From<skill_library_manifest::ManifestError> for CommandError {
+    fn from(value: skill_library_manifest::ManifestError) -> Self {
         Self::coded("manifest_error", value.to_string())
     }
 }
 
-impl From<teamai_installer::InstallerError> for CommandError {
-    fn from(value: teamai_installer::InstallerError) -> Self {
+impl From<skill_library_installer::InstallerError> for CommandError {
+    fn from(value: skill_library_installer::InstallerError) -> Self {
         Self::coded("installer_error", value.to_string())
     }
 }
 
-impl From<teamai_sync::SyncError> for CommandError {
-    fn from(value: teamai_sync::SyncError) -> Self {
+impl From<skill_library_sync::SyncError> for CommandError {
+    fn from(value: skill_library_sync::SyncError) -> Self {
         let code = match value {
-            teamai_sync::SyncError::NotFound(_) => "subscription_not_found",
-            teamai_sync::SyncError::RemoteNotFound(_) => "remote_not_found",
+            skill_library_sync::SyncError::NotFound(_) => "subscription_not_found",
+            skill_library_sync::SyncError::RemoteNotFound(_) => "remote_not_found",
             _ => "sync_error",
         };
         Self::coded(code, value.to_string())
     }
 }
 
-impl From<teamai_publish::PublishError> for CommandError {
-    fn from(value: teamai_publish::PublishError) -> Self {
+impl From<skill_library_publish::PublishError> for CommandError {
+    fn from(value: skill_library_publish::PublishError) -> Self {
         Self::coded("publish_error", value.to_string())
     }
 }
@@ -185,8 +185,8 @@ struct PublishPullRequestSummary {
     state: String,
 }
 
-impl From<teamai_provider::PullRequest> for PublishPullRequestSummary {
-    fn from(value: teamai_provider::PullRequest) -> Self {
+impl From<skill_library_provider::PullRequest> for PublishPullRequestSummary {
+    fn from(value: skill_library_provider::PullRequest) -> Self {
         Self {
             number: value.number,
             title: value.title,
@@ -313,7 +313,7 @@ struct SkillComparison {
 #[tauri::command]
 fn app_init() -> CommandResult<AppStateSummary> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     Ok(AppStateSummary {
         home: paths.home,
         config: paths.config,
@@ -329,15 +329,15 @@ fn get_deep_link_state(app: tauri::AppHandle) -> CommandResult<Option<DeepLinkPa
 
 #[tauri::command]
 fn scan_workspace(path: String) -> CommandResult<Vec<SkillAsset>> {
-    Ok(teamai_manifest::scan_workspace(path)?)
+    Ok(skill_library_manifest::scan_workspace(path)?)
 }
 
 #[tauri::command]
 fn get_auth_status() -> CommandResult<AuthStatus> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
-    let github = teamai_core::load_github_credential(&paths.credentials)?;
-    let credential_store = teamai_core::keychain_store_name().to_owned();
+    skill_library_sync::ensure_local_state(&paths)?;
+    let github = skill_library_core::load_github_credential(&paths.credentials)?;
+    let credential_store = skill_library_core::keychain_store_name().to_owned();
     let (github_login, github_scopes, warning) = match github {
         Some(github) => (
             github.login,
@@ -378,13 +378,13 @@ async fn login_github_token(token: String) -> CommandResult<GitHubLoginResult> {
     }
 
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let provider = GitHubProvider::new(token.clone()).map_err(provider_command_error)?;
     let info = provider
         .validate_token()
         .await
         .map_err(provider_command_error)?;
-    teamai_core::save_github_credential(
+    skill_library_core::save_github_credential(
         &paths.credentials,
         GitHubCredential {
             token,
@@ -392,7 +392,7 @@ async fn login_github_token(token: String) -> CommandResult<GitHubLoginResult> {
             scopes: info.scopes.clone(),
         },
     )?;
-    let credential_store = teamai_core::keychain_store_name().to_owned();
+    let credential_store = skill_library_core::keychain_store_name().to_owned();
 
     Ok(GitHubLoginResult {
         login: info.user.login,
@@ -400,6 +400,14 @@ async fn login_github_token(token: String) -> CommandResult<GitHubLoginResult> {
         credential_store: credential_store.clone(),
         warning: credential_warning(&paths, &credential_store),
     })
+}
+
+#[tauri::command]
+fn logout_github() -> CommandResult<()> {
+    let paths = AppPaths::resolve()?;
+    skill_library_sync::ensure_local_state(&paths)?;
+    skill_library_core::delete_github_credential(&paths.credentials)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -445,13 +453,13 @@ async fn poll_github_device_flow(
         .map_err(provider_command_error)?;
     if let Some(token) = response.access_token {
         let paths = AppPaths::resolve()?;
-        teamai_sync::ensure_local_state(&paths)?;
+        skill_library_sync::ensure_local_state(&paths)?;
         let provider = GitHubProvider::new(token.clone()).map_err(provider_command_error)?;
         let info = provider
             .validate_token()
             .await
             .map_err(provider_command_error)?;
-        teamai_core::save_github_credential(
+        skill_library_core::save_github_credential(
             &paths.credentials,
             GitHubCredential {
                 token,
@@ -459,7 +467,7 @@ async fn poll_github_device_flow(
                 scopes: info.scopes.clone(),
             },
         )?;
-        let credential_store = teamai_core::keychain_store_name().to_owned();
+        let credential_store = skill_library_core::keychain_store_name().to_owned();
         return Ok(GitHubDevicePollResult::Authorized {
             login: GitHubLoginResult {
                 login: info.user.login,
@@ -493,8 +501,10 @@ async fn poll_github_device_flow(
 #[tauri::command]
 fn list_workspaces() -> CommandResult<WorkspacesFile> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
-    Ok(teamai_sync::read_workspaces(&paths.workspace_registry)?)
+    skill_library_sync::ensure_local_state(&paths)?;
+    Ok(skill_library_sync::read_workspaces(
+        &paths.workspace_registry,
+    )?)
 }
 
 #[tauri::command]
@@ -506,11 +516,11 @@ async fn add_workspace(
     webhook_events: Option<Vec<String>>,
 ) -> CommandResult<StoredWorkspace> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
     let token = token.or_else(|| saved_github_token(&paths));
     let webhook = workspace_webhook_registration(webhook_url, webhook_secret, webhook_events)?;
-    Ok(teamai_sync::add_github_workspace_with_webhook(
+    Ok(skill_library_sync::add_github_workspace_with_webhook(
         &paths.workspace_registry,
         &workspace,
         token.as_deref(),
@@ -525,11 +535,11 @@ async fn scan_github_workspace(
     token: Option<String>,
 ) -> CommandResult<WorkspaceSkillsResponse> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
     let token = token.or_else(|| saved_github_token(&paths));
     let remote: RemoteWorkspaceSkills =
-        teamai_sync::scan_github_workspace_skills(&workspace, token.as_deref()).await?;
+        skill_library_sync::scan_github_workspace_skills(&workspace, token.as_deref()).await?;
     Ok(WorkspaceSkillsResponse {
         workspace: remote.workspace,
         skills: remote.skills,
@@ -543,11 +553,11 @@ async fn scan_github_workspace_streaming(
     token: Option<String>,
 ) -> CommandResult<WorkspaceSkillsResponse> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
     let token = token.or_else(|| saved_github_token(&paths));
     let app_handle = app.clone();
-    let remote: RemoteWorkspaceSkills = teamai_sync::scan_github_workspace_skills_streaming(
+    let remote: RemoteWorkspaceSkills = skill_library_sync::scan_github_workspace_skills_streaming(
         &workspace,
         token.as_deref(),
         |batch| {
@@ -567,10 +577,10 @@ async fn get_workspace_detail(
     token: Option<String>,
 ) -> CommandResult<WorkspaceDetailScan> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
     let token = token.or_else(|| saved_github_token(&paths));
-    Ok(teamai_sync::scan_github_workspace_detail(&workspace, token.as_deref()).await?)
+    Ok(skill_library_sync::scan_github_workspace_detail(&workspace, token.as_deref()).await?)
 }
 
 #[tauri::command]
@@ -581,10 +591,10 @@ async fn get_skill_detail(
     token: Option<String>,
 ) -> CommandResult<SkillDetailScan> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
     let token = token.or_else(|| saved_github_token(&paths));
-    Ok(teamai_sync::read_github_skill_detail(
+    Ok(skill_library_sync::read_github_skill_detail(
         &workspace,
         &skill_path,
         ref_name.as_deref(),
@@ -661,7 +671,7 @@ async fn search_skills_registry(
     }
 
     let client = reqwest::Client::builder()
-        .user_agent("team-ai-hub/0.1")
+        .user_agent("skill-library/0.1")
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|err| CommandError::coded("registry_client", err.to_string()))?;
@@ -701,7 +711,7 @@ async fn search_skills_registry(
 #[tauri::command]
 async fn list_github_workspaces(query: Option<String>) -> CommandResult<Vec<Workspace>> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let token = saved_github_token(&paths).ok_or_else(|| {
         CommandError::coded(
             "missing_github_token",
@@ -736,7 +746,7 @@ async fn invite_github_collaborator(
     token: Option<String>,
 ) -> CommandResult<Invitation> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
     let token = token
         .or_else(|| saved_github_token(&paths))
@@ -786,7 +796,7 @@ async fn list_workspace_members(
     token: Option<String>,
 ) -> CommandResult<Vec<Member>> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
     let token = token
         .or_else(|| saved_github_token(&paths))
@@ -819,7 +829,7 @@ async fn compare_skill_versions(
     token: Option<String>,
 ) -> CommandResult<SkillComparison> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
     let token = token.or_else(|| saved_github_token(&paths));
     let provider = github_provider(token.as_deref())?;
@@ -831,16 +841,20 @@ async fn compare_skill_versions(
         )
         .await
         .map_err(provider_command_error)?;
-    let from_detail = teamai_sync::read_github_skill_detail(
+    let from_detail = skill_library_sync::read_github_skill_detail(
         &workspace,
         &skill_path,
         Some(&from),
         token.as_deref(),
     )
     .await?;
-    let to_detail =
-        teamai_sync::read_github_skill_detail(&workspace, &skill_path, Some(&to), token.as_deref())
-            .await?;
+    let to_detail = skill_library_sync::read_github_skill_detail(
+        &workspace,
+        &skill_path,
+        Some(&to),
+        token.as_deref(),
+    )
+    .await?;
     let files = comparison
         .files
         .into_iter()
@@ -852,7 +866,7 @@ async fn compare_skill_versions(
         from,
         to,
         files,
-        semantic: teamai_manifest::semantic_diff(
+        semantic: skill_library_manifest::semantic_diff(
             &from_detail.asset.manifest,
             &to_detail.asset.manifest,
         ),
@@ -860,15 +874,17 @@ async fn compare_skill_versions(
 }
 
 #[tauri::command]
-fn parse_skill(path: String) -> CommandResult<teamai_manifest::ManifestParseResult> {
-    Ok(teamai_manifest::parse_skill_dir(path)?)
+fn parse_skill(path: String) -> CommandResult<skill_library_manifest::ManifestParseResult> {
+    Ok(skill_library_manifest::parse_skill_dir(path)?)
 }
 
 #[tauri::command]
 fn read_subscriptions() -> CommandResult<SubscriptionsFile> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
-    Ok(teamai_sync::read_subscriptions(&paths.subscriptions)?)
+    skill_library_sync::ensure_local_state(&paths)?;
+    Ok(skill_library_sync::read_subscriptions(
+        &paths.subscriptions,
+    )?)
 }
 
 #[tauri::command]
@@ -879,18 +895,21 @@ fn subscribe_workspace_skill(
     targets: Vec<String>,
 ) -> CommandResult<SubscriptionsFile> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
     let subscription = Subscription {
         workspace,
         asset_id,
         channel: "stable".to_owned(),
         version,
-        update: teamai_core::UpdatePolicy::Manual,
+        update: skill_library_core::UpdatePolicy::Manual,
         targets: selection_from_targets(targets),
         subscribed_at: None,
     };
-    Ok(teamai_sync::subscribe(&paths.subscriptions, subscription)?)
+    Ok(skill_library_sync::subscribe(
+        &paths.subscriptions,
+        subscription,
+    )?)
 }
 
 /// Download + install all subscribed skills (GitHub archive → extract → install
@@ -901,9 +920,9 @@ fn subscribe_workspace_skill(
 #[tauri::command]
 async fn sync_now(allow_risky: Option<bool>) -> CommandResult<SyncReport> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let token = saved_github_token(&paths);
-    let report = teamai_sync::sync_subscriptions(
+    let report = skill_library_sync::sync_subscriptions(
         &paths,
         SyncOptions {
             token,
@@ -924,7 +943,7 @@ fn install_skill(
     project_targets: Option<Vec<ProjectInstallTarget>>,
 ) -> CommandResult<InstallReport> {
     let source_dir = PathBuf::from(source);
-    let parse_result = teamai_manifest::parse_skill_dir(&source_dir)?;
+    let parse_result = skill_library_manifest::parse_skill_dir(&source_dir)?;
     let manifest = parse_result.manifest.ok_or_else(|| {
         CommandError::coded(
             "invalid_skill_source",
@@ -952,7 +971,7 @@ fn install_skill(
     if !targets.is_empty() {
         merge_install_report(
             &mut report,
-            teamai_installer::install(InstallOptions {
+            skill_library_installer::install(InstallOptions {
                 source_dir: source_dir.clone(),
                 targets,
                 target_roots: Vec::<TargetRoot>::new(),
@@ -970,7 +989,7 @@ fn install_skill(
         })?;
         merge_install_report(
             &mut report,
-            teamai_installer::install(InstallOptions {
+            skill_library_installer::install(InstallOptions {
                 source_dir: source_dir.clone(),
                 targets: vec![target.runtime.clone()],
                 target_roots: vec![TargetRoot {
@@ -991,7 +1010,7 @@ fn merge_install_report(report: &mut InstallReport, next: InstallReport) {
 
 #[tauri::command]
 fn remove_skill(skill_id: String, targets: Vec<String>) -> CommandResult<Vec<PathBuf>> {
-    Ok(teamai_installer::remove(
+    Ok(skill_library_installer::remove(
         &skill_id,
         &targets,
         Vec::<TargetRoot>::new(),
@@ -1396,6 +1415,45 @@ fn db_check_project_deployments(app: tauri::AppHandle) -> CommandResult<usize> {
 }
 
 #[tauri::command]
+fn db_add_project_deployments(
+    app: tauri::AppHandle,
+    skill_id: String,
+    project_targets: Vec<ProjectInstallTarget>,
+) -> CommandResult<()> {
+    if project_targets.is_empty() {
+        return Err(CommandError::coded(
+            "missing_project_target",
+            "at least one project target is required",
+        ));
+    }
+
+    let database = app.state::<Mutex<db::Database>>();
+    let db_guard = database.lock().unwrap();
+    let skill = db_guard
+        .get_skill(&skill_id)
+        .map_err(|e| CommandError::coded("db_error", e.to_string()))?
+        .ok_or_else(|| {
+            CommandError::coded("skill_not_found", format!("skill '{}' not found", skill_id))
+        })?;
+    let source_path = PathBuf::from(&skill.local_path);
+    if !source_path.join("SKILL.md").is_file() {
+        return Err(CommandError::coded(
+            "skill_source_missing",
+            format!("'{}' is missing SKILL.md", source_path.display()),
+        ));
+    }
+
+    link_project_deployments(
+        &db_guard,
+        &skill_id,
+        &source_path,
+        &project_targets,
+        &skill.link_mode,
+        &skill.baseline_hash,
+    )
+}
+
+#[tauri::command]
 fn db_set_project_deployment_enabled(
     app: tauri::AppHandle,
     deployment_id: i64,
@@ -1521,7 +1579,7 @@ fn db_scan_unmanaged(app: tauri::AppHandle) -> CommandResult<Vec<UnmanagedSkillI
 #[tauri::command]
 fn db_import_skill(
     app: tauri::AppHandle,
-    skill_id: String,
+    _skill_id: String,
     source_path: String,
     link_mode: Option<String>,
     project_targets: Option<Vec<ProjectInstallTarget>>,
@@ -1546,7 +1604,7 @@ fn db_import_skill(
         ));
     }
 
-    let source_parse = teamai_manifest::parse_skill_dir(&source)
+    let source_parse = skill_library_manifest::parse_skill_dir(&source)
         .map_err(|err| CommandError::coded("invalid_skill_source", err.to_string()))?;
     let source_manifest = source_parse.manifest.ok_or_else(|| {
         CommandError::coded(
@@ -1554,7 +1612,7 @@ fn db_import_skill(
             format!("invalid SKILL.md metadata: {:?}", source_parse.errors),
         )
     })?;
-    let resolved_skill_id = resolve_import_skill_id(&skill_id, &source_manifest.name)?;
+    let resolved_skill_id = resolve_import_skill_id(&source_manifest.name)?;
     let dest = paths.home.join("skills").join(&resolved_skill_id);
 
     // Copy skill to our data directory
@@ -1564,7 +1622,7 @@ fn db_import_skill(
     }
 
     // Parse manifest for metadata
-    let manifest = teamai_manifest::parse_skill_dir(&dest)
+    let manifest = skill_library_manifest::parse_skill_dir(&dest)
         .ok()
         .and_then(|p| p.manifest);
 
@@ -1667,13 +1725,8 @@ fn db_import_skill(
     })
 }
 
-fn resolve_import_skill_id(requested: &str, skill_name: &str) -> CommandResult<String> {
-    let raw = if requested.trim().is_empty() {
-        skill_name.trim()
-    } else {
-        requested.trim()
-    };
-    let id = sanitize_skill_id(raw);
+fn resolve_import_skill_id(skill_name: &str) -> CommandResult<String> {
+    let id = sanitize_skill_id(skill_name);
     if id.is_empty() {
         return Err(CommandError::coded(
             "invalid_skill_id",
@@ -1764,7 +1817,7 @@ async fn download_skill_async(
     project_targets: Option<Vec<ProjectInstallTarget>>,
 ) -> CommandResult<()> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let workspace_ref = parse_workspace(&workspace)?;
 
     let link_mode = link_mode.unwrap_or_else(|| "symlink".to_owned());
@@ -1939,7 +1992,7 @@ async fn run_skill_download(
         );
     };
 
-    let prepared = match teamai_sync::download_skill_for_install(
+    let prepared = match skill_library_sync::download_skill_for_install(
         &paths,
         &workspace,
         &asset_id,
@@ -1969,12 +2022,16 @@ async fn run_skill_download(
     let baseline_hash = db::compute_dir_hash(&dest);
 
     {
+        let prepared_source_path = prepared.source_path.to_string_lossy().to_string();
         let database = app.state::<Mutex<db::Database>>();
         let lock = database.lock();
         if let Ok(db_guard) = lock {
             if let Err(err) = db_guard.finish_download(
                 &asset_id,
+                &prepared.manifest.name,
+                &prepared.manifest.description,
                 &prepared.manifest.version,
+                &prepared_source_path,
                 &prepared.ref_name,
                 &dest.to_string_lossy(),
                 &baseline_hash,
@@ -2041,7 +2098,7 @@ async fn run_skill_download(
     );
 }
 
-/// Open the Team AI Hub data directory in the system file manager.
+/// Open the Skill Library data directory in the system file manager.
 #[tauri::command]
 fn open_data_dir(app: tauri::AppHandle) -> CommandResult<()> {
     let paths = AppPaths::resolve()?;
@@ -2352,14 +2409,14 @@ fn db_cache_delete_prefix(app: tauri::AppHandle, prefix: String) -> CommandResul
 }
 
 // ---------------------------------------------------------------------------
-// Filesystem-based remote file cache (~/.team-ai-hub/remote/)
+// Filesystem-based remote file cache (~/.skill-library/remote/)
 // ---------------------------------------------------------------------------
 
-/// Resolve the remote cache root: ~/.team-ai-hub/remote/
+/// Resolve the remote cache root: ~/.skill-library/remote/
 fn remote_cache_root() -> CommandResult<PathBuf> {
     let home = dirs::home_dir()
         .ok_or_else(|| CommandError::coded("no_home", "cannot resolve home directory"))?;
-    Ok(home.join(".team-ai-hub").join("remote"))
+    Ok(home.join(".skill-library").join("remote"))
 }
 
 /// Validate a path segment to prevent path traversal attacks.
@@ -2648,7 +2705,7 @@ fn db_unmanage_skill(app: tauri::AppHandle, skill_id: String) -> CommandResult<(
         .map_err(|e| CommandError::coded("db_error", e.to_string()))?;
 
     // Optionally remove from our data directory (keep it for safety)
-    // Users can manually delete ~/.team-ai-hub/skills/{id} if they want
+    // Users can manually delete ~/.skill-library/skills/{id} if they want
 
     Ok(())
 }
@@ -2661,7 +2718,8 @@ fn list_installed_targets(
     target_list
         .into_iter()
         .map(|target| {
-            let skills = teamai_installer::list_installed(&target, Vec::<TargetRoot>::new())?;
+            let skills =
+                skill_library_installer::list_installed(&target, Vec::<TargetRoot>::new())?;
             Ok(InstalledTargetGroup { target, skills })
         })
         .collect()
@@ -2687,10 +2745,10 @@ fn preview_publish(
     workspace: Option<String>,
     user: Option<String>,
 ) -> CommandResult<PublishPreview> {
-    let package = teamai_publish::package_skill(source)?;
-    let policy = teamai_publish::evaluate_publish_policy(&package)?;
+    let package = skill_library_publish::package_skill(source)?;
+    let policy = skill_library_publish::evaluate_publish_policy(&package)?;
     let request = match workspace {
-        Some(workspace) => Some(teamai_publish::build_publish_request(
+        Some(workspace) => Some(skill_library_publish::build_publish_request(
             &package,
             &parse_workspace(&workspace)?,
             user.as_deref().unwrap_or("local"),
@@ -2752,7 +2810,7 @@ async fn fetch_remote_skill_to_temp(
     fs::create_dir_all(&scratch).map_err(CommandError::from)?;
 
     for entry in entries {
-        if !matches!(entry.kind, teamai_provider::FileKind::File) {
+        if !matches!(entry.kind, skill_library_provider::FileKind::File) {
             continue;
         }
         let blob = provider
@@ -3057,7 +3115,7 @@ async fn preview_publish_from_workspace(
     user: Option<String>,
 ) -> CommandResult<PublishPreview> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let token = saved_github_token(&paths).ok_or_else(|| {
         CommandError::coded(
             "missing_github_token",
@@ -3103,9 +3161,9 @@ async fn preview_publish_from_workspace(
     )
     .await?;
 
-    let package = teamai_publish::package_skill(&scratch)?;
-    let policy = teamai_publish::evaluate_publish_policy(&package)?;
-    let request = teamai_publish::build_publish_request(
+    let package = skill_library_publish::package_skill(&scratch)?;
+    let policy = skill_library_publish::evaluate_publish_policy(&package)?;
+    let request = skill_library_publish::build_publish_request(
         &package,
         &target_ws,
         user.as_deref().unwrap_or("local"),
@@ -3129,7 +3187,7 @@ async fn publish_skill_to_workspace(
     confirmed_risk: Option<bool>,
 ) -> CommandResult<PublishResult> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let token = saved_github_token(&paths).ok_or_else(|| {
         CommandError::coded(
             "missing_github_token",
@@ -3173,12 +3231,12 @@ async fn publish_skill_to_workspace(
     )
     .await?;
 
-    let package = teamai_publish::package_skill(&scratch)?;
-    let policy = teamai_publish::evaluate_publish_policy(&package)?;
+    let package = skill_library_publish::package_skill(&scratch)?;
+    let policy = skill_library_publish::evaluate_publish_policy(&package)?;
 
     if matches!(
         policy.decision,
-        teamai_publish::PublishPolicyDecision::Reject
+        skill_library_publish::PublishPolicyDecision::Reject
     ) {
         return Err(CommandError::coded(
             "publish_rejected",
@@ -3188,7 +3246,8 @@ async fn publish_skill_to_workspace(
             ),
         ));
     }
-    if package.risk_level != teamai_core::RiskLevel::Low && !confirmed_risk.unwrap_or(false) {
+    if package.risk_level != skill_library_core::RiskLevel::Low && !confirmed_risk.unwrap_or(false)
+    {
         return Err(CommandError::coded(
             "risk_confirmation_required",
             format!(
@@ -3198,12 +3257,12 @@ async fn publish_skill_to_workspace(
         ));
     }
 
-    let request = teamai_publish::build_publish_request(
+    let request = skill_library_publish::build_publish_request(
         &package,
         &target_ws,
         user.as_deref().unwrap_or("local"),
     );
-    let publish_files = teamai_publish::collect_publish_files(&package)?;
+    let publish_files = skill_library_publish::collect_publish_files(&package)?;
     let github_files: Vec<GitHubPublishFile> = publish_files
         .iter()
         .map(|file| GitHubPublishFile {
@@ -3218,7 +3277,7 @@ async fn publish_skill_to_workspace(
             GitHubPublishInput {
                 branch_name: request.branch_name.clone(),
                 commit_message: format!(
-                    "teamai: import {} v{}",
+                    "skill-library: import {} v{}",
                     package.manifest.id, package.manifest.version
                 ),
                 title: request.title.clone(),
@@ -3264,7 +3323,7 @@ async fn publish_workspace_skill_update(
     confirmed_risk: Option<bool>,
 ) -> CommandResult<PublishResult> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let token = saved_github_token(&paths).ok_or_else(|| {
         CommandError::coded(
             "missing_github_token",
@@ -3283,16 +3342,16 @@ async fn publish_workspace_skill_update(
         apply_publish_draft(&scratch, &skill_path, draft)?;
     }
 
-    let current_package = teamai_publish::package_skill(&scratch)?;
+    let current_package = skill_library_publish::package_skill(&scratch)?;
     let next_version = bump_version_string(&current_package.manifest.version, &version_bump)?;
     rewrite_skill_version(&scratch, &next_version)?;
 
-    let package = teamai_publish::package_skill(&scratch)?;
-    let policy = teamai_publish::evaluate_publish_policy(&package)?;
+    let package = skill_library_publish::package_skill(&scratch)?;
+    let policy = skill_library_publish::evaluate_publish_policy(&package)?;
 
     if matches!(
         policy.decision,
-        teamai_publish::PublishPolicyDecision::Reject
+        skill_library_publish::PublishPolicyDecision::Reject
     ) {
         return Err(CommandError::coded(
             "publish_rejected",
@@ -3302,7 +3361,8 @@ async fn publish_workspace_skill_update(
             ),
         ));
     }
-    if package.risk_level != teamai_core::RiskLevel::Low && !confirmed_risk.unwrap_or(false) {
+    if package.risk_level != skill_library_core::RiskLevel::Low && !confirmed_risk.unwrap_or(false)
+    {
         return Err(CommandError::coded(
             "risk_confirmation_required",
             format!(
@@ -3312,7 +3372,7 @@ async fn publish_workspace_skill_update(
         ));
     }
 
-    let mut request = teamai_publish::build_publish_request(
+    let mut request = skill_library_publish::build_publish_request(
         &package,
         &target_ws,
         user.as_deref().unwrap_or("local"),
@@ -3326,7 +3386,7 @@ async fn publish_workspace_skill_update(
         request.body = format!("## Release notes\n\n{}\n\n{}", release_notes, request.body);
     }
 
-    let publish_files = teamai_publish::collect_publish_files(&package)?;
+    let publish_files = skill_library_publish::collect_publish_files(&package)?;
     let github_files: Vec<GitHubPublishFile> = publish_files
         .iter()
         .map(|file| {
@@ -3345,7 +3405,7 @@ async fn publish_workspace_skill_update(
             GitHubPublishInput {
                 branch_name: request.branch_name.clone(),
                 commit_message: format!(
-                    "teamai: update {} to v{}",
+                    "skill-library: update {} to v{}",
                     package.manifest.id, package.manifest.version
                 ),
                 title: request.title.clone(),
@@ -3390,7 +3450,7 @@ async fn try_merge_and_cleanup_branch(
         Ok(_) => {
             let mut deleted_branch = false;
             let mut error = None;
-            if is_teamai_publish_branch(branch) {
+            if is_skill_library_publish_branch(branch) {
                 match provider.delete_branch(workspace, branch).await {
                     Ok(()) => deleted_branch = true,
                     Err(err) => error = Some(format!("merged, but branch cleanup failed: {err}")),
@@ -3414,26 +3474,26 @@ async fn can_auto_merge_workspace(provider: &GitHubProvider, workspace: &Workspa
     let user = match provider.current_user().await {
         Ok(user) => user,
         Err(err) => {
-            tracing::warn!(target: "teamai-publish", workspace = %workspace.full_name(), error = %err, "skip auto-merge: unable to read current GitHub user");
+            tracing::warn!(target: "skill-library-publish", workspace = %workspace.full_name(), error = %err, "skip auto-merge: unable to read current GitHub user");
             return false;
         }
     };
     match provider.check_permission(workspace, &user.login).await {
         Ok(PermissionLevel::Admin | PermissionLevel::Maintain | PermissionLevel::Write) => true,
         Ok(permission) => {
-            tracing::debug!(target: "teamai-publish", workspace = %workspace.full_name(), user = %user.login, ?permission, "skip auto-merge: insufficient permission");
+            tracing::debug!(target: "skill-library-publish", workspace = %workspace.full_name(), user = %user.login, ?permission, "skip auto-merge: insufficient permission");
             false
         }
         Err(err) => {
-            tracing::warn!(target: "teamai-publish", workspace = %workspace.full_name(), user = %user.login, error = %err, "skip auto-merge: permission check failed");
+            tracing::warn!(target: "skill-library-publish", workspace = %workspace.full_name(), user = %user.login, error = %err, "skip auto-merge: permission check failed");
             false
         }
     }
 }
 
-fn is_teamai_publish_branch(branch: &str) -> bool {
+fn is_skill_library_publish_branch(branch: &str) -> bool {
     let parts = branch.split('/').collect::<Vec<_>>();
-    if parts.len() != 4 || parts[0] != "teamai" || parts[1] != "import" {
+    if parts.len() != 4 || parts[0] != "skill-library" || parts[1] != "import" {
         return false;
     }
     let skill = parts[2];
@@ -3449,14 +3509,14 @@ fn is_teamai_publish_branch(branch: &str) -> bool {
 #[tauri::command]
 fn export_diagnostics() -> CommandResult<DiagnosticsExport> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     export_diagnostics_bundle(&paths)
 }
 
 #[tauri::command]
 fn open_logs_folder(app: tauri::AppHandle) -> CommandResult<()> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     app.opener()
         .open_path(paths.logs.to_string_lossy().to_string(), None::<&str>)
         .map_err(|err| CommandError::coded("open_logs_failed", err.to_string()))?;
@@ -3470,8 +3530,8 @@ fn export_diagnostics_bundle(paths: &AppPaths) -> CommandResult<DiagnosticsExpor
         .join("diagnostics")
         .join(exported_at.format("%Y%m%dT%H%M%SZ").to_string());
     fs::create_dir_all(&output_dir).map_err(CommandError::from)?;
-    let subscriptions = teamai_sync::read_subscriptions(&paths.subscriptions)?;
-    let workspaces = teamai_sync::read_workspaces(&paths.workspace_registry)?;
+    let subscriptions = skill_library_sync::read_subscriptions(&paths.subscriptions)?;
+    let workspaces = skill_library_sync::read_workspaces(&paths.workspace_registry)?;
     fs::write(
         output_dir.join("summary.json"),
         serde_json::to_vec_pretty(&serde_json::json!({
@@ -3590,7 +3650,7 @@ fn register_deep_link<R: tauri::Runtime>(app: &tauri::AppHandle<R>, url: Url) {
 }
 
 fn parse_deep_link(url: Url) -> Option<DeepLinkPayload> {
-    if url.scheme() != "teamai" {
+    if url.scheme() != "skill-library" {
         return None;
     }
     let action = url.host_str().unwrap_or_default().to_owned();
@@ -3679,7 +3739,7 @@ struct WorkspaceChangedPaths {
 #[tauri::command]
 async fn check_workspace_head(workspace: String) -> CommandResult<WorkspaceHeadInfo> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let token = saved_github_token(&paths).ok_or_else(|| {
         CommandError::coded(
             "missing_github_token",
@@ -3722,7 +3782,7 @@ async fn diff_workspace_since(
     skill_paths: Vec<String>,
 ) -> CommandResult<WorkspaceChangedPaths> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let token = saved_github_token(&paths).ok_or_else(|| {
         CommandError::coded(
             "missing_github_token",
@@ -3779,7 +3839,7 @@ struct BranchInfo {
 #[tauri::command]
 async fn list_workspace_branches(workspace: String) -> CommandResult<Vec<BranchInfo>> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let token = saved_github_token(&paths)
         .ok_or_else(|| CommandError::coded("missing_github_token", "log in with GitHub first"))?;
     let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
@@ -3824,7 +3884,7 @@ async fn list_skill_files(
     ref_name: Option<String>,
 ) -> CommandResult<Vec<SkillFileEntry>> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
     let token = saved_github_token(&paths);
     let provider = github_provider(token.as_deref())?;
@@ -3857,7 +3917,7 @@ async fn list_skill_files(
                 path: entry.path,
                 relative_path,
                 kind: match entry.kind {
-                    teamai_provider::FileKind::Directory => "directory".to_owned(),
+                    skill_library_provider::FileKind::Directory => "directory".to_owned(),
                     _ => "file".to_owned(),
                 },
                 size: entry.size,
@@ -3898,7 +3958,7 @@ async fn read_skill_file(
     ref_name: Option<String>,
 ) -> CommandResult<FileContent> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
     let token = saved_github_token(&paths);
     let provider = github_provider(token.as_deref())?;
@@ -3949,7 +4009,7 @@ async fn cache_skill_package(
     ref_name: Option<String>,
 ) -> CommandResult<SkillPackageCacheResult> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let workspace_ref = parse_workspace(&workspace)?;
     let workspace_label = workspace_ref.full_name();
     let token = saved_github_token(&paths);
@@ -3979,7 +4039,7 @@ async fn cache_skill_package(
         .filter(|entry| {
             matches!(
                 entry.kind,
-                teamai_provider::FileKind::File | teamai_provider::FileKind::Symlink
+                skill_library_provider::FileKind::File | skill_library_provider::FileKind::Symlink
             )
         })
         .map(|entry| entry.path)
@@ -4074,7 +4134,7 @@ async fn list_skill_discussions(
     skill_ids: Vec<String>,
 ) -> CommandResult<DiscussionsStatus> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
     let token = saved_github_token(&paths)
         .ok_or_else(|| CommandError::coded("missing_github_token", "log in with GitHub first"))?;
@@ -4238,7 +4298,7 @@ async fn get_discussion_by_number(
     discussion_number: u64,
 ) -> CommandResult<Option<DiscussionInfo>> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
     let token = saved_github_token(&paths)
         .ok_or_else(|| CommandError::coded("missing_github_token", "log in with GitHub first"))?;
@@ -4361,7 +4421,7 @@ async fn get_discussion_comments(
     discussion_number: u64,
 ) -> CommandResult<Vec<DiscussionComment>> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
     let token = saved_github_token(&paths)
         .ok_or_else(|| CommandError::coded("missing_github_token", "log in with GitHub first"))?;
@@ -4486,7 +4546,7 @@ async fn add_discussion_comment(
     body: String,
 ) -> CommandResult<DiscussionComment> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let _workspace = parse_workspace(&workspace)?;
     let token = saved_github_token(&paths)
         .ok_or_else(|| CommandError::coded("missing_github_token", "log in with GitHub first"))?;
@@ -4567,7 +4627,7 @@ async fn toggle_discussion_reaction(
     content: String,
 ) -> CommandResult<Vec<ReactionGroup>> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let _workspace = parse_workspace(&workspace)?;
     let token = saved_github_token(&paths)
         .ok_or_else(|| CommandError::coded("missing_github_token", "log in with GitHub first"))?;
@@ -4675,7 +4735,7 @@ async fn remove_discussion_reaction(
     content: String,
 ) -> CommandResult<Vec<ReactionGroup>> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let _workspace = parse_workspace(&workspace)?;
     let token = saved_github_token(&paths)
         .ok_or_else(|| CommandError::coded("missing_github_token", "log in with GitHub first"))?;
@@ -4757,7 +4817,7 @@ async fn create_skill_discussion(
     body: Option<String>,
 ) -> CommandResult<DiscussionInfo> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
     let token = saved_github_token(&paths)
         .ok_or_else(|| CommandError::coded("missing_github_token", "log in with GitHub first"))?;
@@ -4986,7 +5046,7 @@ async fn list_skill_commits(
     limit: Option<u32>,
 ) -> CommandResult<Vec<CommitSummary>> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let token = saved_github_token(&paths).ok_or_else(|| {
         CommandError::coded(
             "missing_github_token",
@@ -5008,7 +5068,7 @@ async fn list_workspace_pull_requests(
     state: Option<String>,
 ) -> CommandResult<Vec<PullRequestSummary>> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let token = saved_github_token(&paths).ok_or_else(|| {
         CommandError::coded(
             "missing_github_token",
@@ -5034,7 +5094,7 @@ async fn list_workspace_pull_request_files(
     number: u64,
 ) -> CommandResult<Vec<ChangedFile>> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let token = saved_github_token(&paths).ok_or_else(|| {
         CommandError::coded(
             "missing_github_token",
@@ -5058,7 +5118,7 @@ async fn merge_workspace_pull_request(
     delete_branch: Option<bool>,
 ) -> CommandResult<PublishAutoMergeResult> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let token = saved_github_token(&paths).ok_or_else(|| {
         CommandError::coded(
             "missing_github_token",
@@ -5077,7 +5137,10 @@ async fn merge_workspace_pull_request(
         .as_deref()
         .map(|repo| repo == workspace.full_name())
         .unwrap_or(false);
-    if delete_branch.unwrap_or(true) && can_delete_head && is_teamai_publish_branch(&head_ref) {
+    if delete_branch.unwrap_or(true)
+        && can_delete_head
+        && is_skill_library_publish_branch(&head_ref)
+    {
         match provider.delete_branch(&workspace, &head_ref).await {
             Ok(()) => deleted_branch = true,
             Err(err) => error = Some(format!("merged, but branch cleanup failed: {err}")),
@@ -5097,7 +5160,7 @@ async fn close_workspace_pull_request(
     comment: Option<String>,
 ) -> CommandResult<PullRequestSummary> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let token = saved_github_token(&paths).ok_or_else(|| {
         CommandError::coded(
             "missing_github_token",
@@ -5129,7 +5192,7 @@ async fn add_workspace_pull_request_comment(
     body: String,
 ) -> CommandResult<IssueComment> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let token = saved_github_token(&paths).ok_or_else(|| {
         CommandError::coded(
             "missing_github_token",
@@ -5154,7 +5217,7 @@ async fn add_workspace_pull_request_comment(
 #[tauri::command]
 async fn list_workspace_events(workspace: String) -> CommandResult<Vec<RepositoryEvent>> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let token = saved_github_token(&paths).ok_or_else(|| {
         CommandError::coded(
             "missing_github_token",
@@ -5172,7 +5235,7 @@ async fn list_workspace_events(workspace: String) -> CommandResult<Vec<Repositor
 #[tauri::command]
 async fn list_repository_invitations() -> CommandResult<Vec<RepositoryInvitation>> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let token = saved_github_token(&paths).ok_or_else(|| {
         CommandError::coded(
             "missing_github_token",
@@ -5189,7 +5252,7 @@ async fn list_repository_invitations() -> CommandResult<Vec<RepositoryInvitation
 #[tauri::command]
 async fn accept_repository_invitation(invitation_id: u64) -> CommandResult<()> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let token = saved_github_token(&paths).ok_or_else(|| {
         CommandError::coded(
             "missing_github_token",
@@ -5256,7 +5319,7 @@ fn workspace_webhook_registration(
 }
 
 fn saved_github_token(paths: &AppPaths) -> Option<String> {
-    teamai_core::load_github_credential(&paths.credentials)
+    skill_library_core::load_github_credential(&paths.credentials)
         .ok()
         .flatten()
         .map(|github| github.token)
@@ -5302,10 +5365,10 @@ async fn get_skill_content_hash(
     ref_name: Option<String>,
 ) -> CommandResult<String> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
     let token = saved_github_token(&paths);
-    let prepared = teamai_sync::prepare_skill_for_review(
+    let prepared = skill_library_sync::prepare_skill_for_review(
         &paths,
         &workspace,
         &skill_path,
@@ -5321,7 +5384,7 @@ async fn get_skill_content_hash(
 #[tauri::command]
 async fn get_remote_review(workspace: String, skill_id: String) -> CommandResult<Option<String>> {
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let token = saved_github_token(&paths);
     let provider = github_provider(token.as_deref())?;
     let workspace = parse_workspace(&workspace)?;
@@ -5340,7 +5403,7 @@ async fn get_remote_review(workspace: String, skill_id: String) -> CommandResult
                 .map_err(|err| CommandError::coded("invalid_review_cache", err.to_string()))?;
             Ok(Some(content))
         }
-        Err(teamai_provider::ProviderError::NotFound { .. }) => Ok(None),
+        Err(skill_library_provider::ProviderError::NotFound { .. }) => Ok(None),
         Err(err) => Err(provider_command_error(err)),
     }
 }
@@ -5355,7 +5418,7 @@ async fn commit_review_to_repo(
         .map_err(|err| CommandError::coded("invalid_review_json", err.to_string()))?;
 
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let token = saved_github_token(&paths).ok_or_else(|| {
         CommandError::coded(
             "missing_github_token",
@@ -5400,7 +5463,7 @@ async fn get_remote_reviews_batch(
         return Ok(Vec::new());
     }
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let token = saved_github_token(&paths);
     let provider = github_provider(token.as_deref())?;
     let workspace = parse_workspace(&workspace)?;
@@ -5420,20 +5483,20 @@ async fn get_remote_reviews_batch(
 
 #[tauri::command]
 fn save_ai_key(key: String) -> CommandResult<()> {
-    teamai_core::write_ai_key(&key)
+    skill_library_core::write_ai_key(&key)
         .map_err(|err| CommandError::coded("ai_key_save", err.to_string()))
 }
 
 #[tauri::command]
 fn delete_ai_key() -> CommandResult<()> {
-    teamai_core::delete_ai_key()
+    skill_library_core::delete_ai_key()
         .map_err(|err| CommandError::coded("ai_key_delete", err.to_string()))
 }
 
 /// Returns whether an AI API key is currently stored (never returns the key).
 #[tauri::command]
 fn has_ai_key() -> CommandResult<bool> {
-    Ok(teamai_core::read_ai_key()
+    Ok(skill_library_core::read_ai_key()
         .map_err(|err| CommandError::coded("ai_key_read", err.to_string()))?
         .map(|k| !k.trim().is_empty())
         .unwrap_or(false))
@@ -5453,7 +5516,7 @@ async fn review_skill(request: ai_review::ReviewRequest) -> CommandResult<ai_rev
             "set the provider base URL in Settings",
         ));
     }
-    let key = teamai_core::read_ai_key()
+    let key = skill_library_core::read_ai_key()
         .map_err(|err| CommandError::coded("ai_key_read", err.to_string()))?
         .filter(|k| !k.trim().is_empty())
         .ok_or_else(|| CommandError::coded("ai_missing_key", "add an AI API key in Settings"))?;
@@ -5462,10 +5525,10 @@ async fn review_skill(request: ai_review::ReviewRequest) -> CommandResult<ai_rev
     // bundle is reviewed, not just SKILL.md. Token is optional (public skills
     // can be reviewed anonymously).
     let paths = AppPaths::resolve()?;
-    teamai_sync::ensure_local_state(&paths)?;
+    skill_library_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&request.workspace)?;
     let token = saved_github_token(&paths);
-    let prepared = teamai_sync::prepare_skill_for_review(
+    let prepared = skill_library_sync::prepare_skill_for_review(
         &paths,
         &workspace,
         &request.skill_path,
@@ -5522,7 +5585,7 @@ async fn review_local_skill(
             "set the provider base URL in Settings",
         ));
     }
-    let key = teamai_core::read_ai_key()
+    let key = skill_library_core::read_ai_key()
         .map_err(|err| CommandError::coded("ai_key_read", err.to_string()))?
         .filter(|k| !k.trim().is_empty())
         .ok_or_else(|| CommandError::coded("ai_missing_key", "add an AI API key in Settings"))?;
@@ -5551,7 +5614,7 @@ async fn review_local_skill(
     }
 
     // Pull declared permissions from the manifest for extra prompt context.
-    let permissions = teamai_manifest::parse_skill_dir(&local_path)
+    let permissions = skill_library_manifest::parse_skill_dir(&local_path)
         .ok()
         .and_then(|p| p.manifest)
         .map(|m| m.permissions)
@@ -5626,7 +5689,7 @@ fn github_provider(token: Option<&str>) -> CommandResult<GitHubProvider> {
     }
 }
 
-fn provider_command_error(err: teamai_provider::ProviderError) -> CommandError {
+fn provider_command_error(err: skill_library_provider::ProviderError) -> CommandError {
     CommandError::coded("provider_error", err.to_string())
 }
 
@@ -5641,15 +5704,17 @@ fn init_tracing() {
     use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("info,teamai=debug,teamai_github=debug,teamai-github=debug")
+        EnvFilter::new(
+            "info,skill-library=debug,skill_library_github=debug,skill-library-github=debug",
+        )
     });
 
     let log_dir = AppPaths::resolve()
         .map(|paths| paths.logs.clone())
-        .unwrap_or_else(|_| std::env::temp_dir().join("team-ai-hub").join("logs"));
+        .unwrap_or_else(|_| std::env::temp_dir().join("skill-library").join("logs"));
     let _ = std::fs::create_dir_all(&log_dir);
 
-    let file_appender = tracing_appender::rolling::daily(&log_dir, "teamai.log");
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "skill-library.log");
 
     let stderr_layer = fmt::layer().with_target(true).with_writer(std::io::stderr);
     let file_layer = fmt::layer()
@@ -5671,8 +5736,8 @@ fn resolve_github_client_id(client_id: Option<String>) -> CommandResult<String> 
     // Three-tier resolution so end users never need to know about client IDs:
     //   1. explicit override from the UI (used in development / advanced flows)
     //   2. runtime env var (lets ops swap the OAuth app without rebuilding)
-    //   3. compile-time default baked in via `TEAMAI_GITHUB_CLIENT_ID`
-    let baked = option_env!("TEAMAI_GITHUB_CLIENT_ID").map(str::to_owned);
+    //   3. compile-time default baked in via `SKILL_LIBRARY_GITHUB_CLIENT_ID`
+    let baked = option_env!("SKILL_LIBRARY_GITHUB_CLIENT_ID").map(str::to_owned);
     let value = client_id
         .or_else(|| std::env::var("GITHUB_CLIENT_ID").ok())
         .or(baked)
@@ -5681,7 +5746,7 @@ fn resolve_github_client_id(client_id: Option<String>) -> CommandResult<String> 
     if trimmed.is_empty() {
         return Err(CommandError::coded(
             "missing_github_client_id",
-            "Team AI Hub is not configured for GitHub sign-in. Build with TEAMAI_GITHUB_CLIENT_ID set, or export GITHUB_CLIENT_ID before launching.",
+            "Skill Library is not configured for GitHub sign-in. Build with SKILL_LIBRARY_GITHUB_CLIENT_ID set, or export GITHUB_CLIENT_ID before launching.",
         ));
     }
     Ok(trimmed)
@@ -5771,8 +5836,8 @@ fn local_agent_entry(path: PathBuf) -> Option<LocalAgentEntry> {
     }
     let manifest_path = path.join("manifest.yaml");
     let skill_md_path = path.join("SKILL.md");
-    let install_metadata_path = path.join(".teamai-install.json");
-    let manifest = teamai_manifest::parse_skill_dir(&path)
+    let install_metadata_path = path.join(".skill-library-install.json");
+    let manifest = skill_library_manifest::parse_skill_dir(&path)
         .ok()
         .and_then(|parsed| parsed.manifest);
     Some(LocalAgentEntry {
@@ -5854,7 +5919,7 @@ pub fn run() {
             let handle = app.handle().clone();
             let window = app.get_webview_window("main");
             if let Some(window) = window {
-                let _ = window.set_title("Team AI Hub");
+                let _ = window.set_title("Skill Library");
             }
             if let Some(deep_link) =
                 handle.try_state::<tauri_plugin_deep_link::DeepLink<tauri::Wry>>()
@@ -5886,6 +5951,7 @@ pub fn run() {
             start_github_device_flow,
             poll_github_device_flow,
             login_github_token,
+            logout_github,
             get_skill_detail,
             get_workspace_detail,
             invite_github_collaborator,
@@ -5943,6 +6009,7 @@ pub fn run() {
             db_enable_skill,
             db_disable_skill,
             db_check_project_deployments,
+            db_add_project_deployments,
             db_scan_unmanaged,
             db_import_skill,
             db_cache_stats,
@@ -5968,7 +6035,7 @@ pub fn run() {
             db_delete_project_deployment
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Team AI Hub");
+        .expect("error while running Skill Library");
 }
 
 #[cfg(test)]

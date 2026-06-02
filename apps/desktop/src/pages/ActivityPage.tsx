@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { useLocale } from "../hooks/useLocale";
-import { listWorkspaceEvents, type WorkspaceEvent } from "../lib/teamai";
+import { listWorkspaceEvents, type WorkspaceEvent } from "../lib/skill-library";
 import { formatRelativeTime, openExternalUrl } from "../utils/format";
 import { Card } from "../widgets/Card";
 import { MetricTile } from "../widgets/MetricTile";

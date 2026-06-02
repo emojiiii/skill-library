@@ -6,10 +6,10 @@ usage() {
 Usage:
   scripts/create-demo-skills-repo.sh [--force] [DEST]
 
-Creates a local Git repository fixture for the Team AI Hub real-provider demo.
+Creates a local Git repository fixture for the Skill Library real-provider demo.
 
 Default DEST:
-  ./team-ai-hub-demo-skills
+  ./skill-library-demo-skills
 
 The repo contains:
   README.md
@@ -25,12 +25,12 @@ The v1.2.1 update is intentionally not created by this script. Use
 scripts/push-demo-update.sh during the final demo to push v1.2.1 and trigger
 the webhook/update evidence step.
 
-Use this fixture as the source for a GitHub repo named team-ai-hub-demo-skills.
+Use this fixture as the source for a GitHub repo named skill-library-demo-skills.
 USAGE
 }
 
 force=0
-dest="team-ai-hub-demo-skills"
+dest="skill-library-demo-skills"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -62,13 +62,13 @@ mkdir -p "$dest/code-reviewer" "$dest/pr-summarizer"
 cd "$dest"
 
 git init -q
-git config user.name "Team AI Hub Demo"
-git config user.email "demo@team-ai-hub.local"
+git config user.name "Skill Library Demo"
+git config user.email "demo@skill-library.local"
 
 cat > README.md <<'EOF'
-# Team AI Hub Demo Skills
+# Skill Library Demo Skills
 
-Demo repository for Team AI Hub MVP validation. It contains two Skills and a tag history designed to exercise browsing, semantic diff, subscription, sync, publish, invitation, update, and rollback flows.
+Demo repository for Skill Library MVP validation. It contains two Skills and a tag history designed to exercise browsing, semantic diff, subscription, sync, publish, invitation, update, and rollback flows.
 EOF
 
 cat > code-reviewer/SKILL.md <<'EOF'
@@ -136,7 +136,7 @@ Created demo repository: $PWD
 
 Push it to GitHub:
   cd "$PWD"
-  git remote add origin git@github.com:OWNER/team-ai-hub-demo-skills.git
+  git remote add origin git@github.com:OWNER/skill-library-demo-skills.git
   git push -u origin main
   git push origin v1.0.0 v1.1.0 v1.2.0
 
@@ -144,7 +144,7 @@ During the update step of the final demo:
   rtk pnpm demo:push-update "$PWD"
 
 Then run:
-  export TEAMAI_DEMO_WORKSPACE=OWNER/team-ai-hub-demo-skills
-  export TEAMAI_DEMO_REPO_DIR="$PWD"
+  export SKILL_LIBRARY_DEMO_WORKSPACE=OWNER/skill-library-demo-skills
+  export SKILL_LIBRARY_DEMO_REPO_DIR="$PWD"
   rtk pnpm demo:real-provider:dry-run
 EOF

@@ -1,10 +1,11 @@
 import { AlertDialog, Button, cn, Modal, ProgressBar, Spinner, Switch, Tooltip, toast } from "@heroui/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, ChevronDown, Download, ExternalLink, FolderOpen, GitPullRequestArrow, Package, PackageOpen, RefreshCw, RotateCcw, ShieldAlert, ShieldCheck, Trash2 } from "lucide-react";
+import { AlertTriangle, ChevronDown, Download, ExternalLink, FolderOpen, FolderPlus, GitPullRequestArrow, Package, PackageOpen, RefreshCw, RotateCcw, ShieldAlert, ShieldCheck, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   type AiReviewResult,
   listPathOpeners,
+  dbAddProjectDeployments,
   dbCheckProjectDeployments,
   dbDeleteProjectDeployment,
   dbDisableSkill,
@@ -26,7 +27,7 @@ import {
   selectSkillDirectory,
   syncNow,
   type UnmanagedSkillInfo,
-} from "../lib/teamai";
+} from "../lib/skill-library";
 import { openExternalUrl } from "../utils/format";
 import { useLocale } from "../hooks/useLocale";
 import { useLocalStorage } from "../hooks/useLocalStorage";
@@ -76,6 +77,9 @@ export function MySkillsPage() {
   const [customProjectInstall, setCustomProjectInstall] = useState(false);
   const [customProjectPath, setCustomProjectPath] = useState("");
   const [customProjectRuntime, setCustomProjectRuntime] = useState("codex");
+  const [projectInstallSkill, setProjectInstallSkill] = useState<ManagedSkill | null>(null);
+  const [projectInstallPath, setProjectInstallPath] = useState("");
+  const [projectInstallRuntime, setProjectInstallRuntime] = useState("codex");
   const [openImportGroups, setOpenImportGroups] = useLocalStorage<Record<string, boolean>>(
     "my-skills:import-groups",
     EMPTY_IMPORT_GROUPS,
@@ -158,6 +162,17 @@ export function MySkillsPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["db-skills"] }),
     onError: (err) => toast.danger(String((err as { message?: string })?.message ?? err)),
   });
+  const addProjectDeployment = useMutation({
+    mutationFn: (a: { skillId: string; runtime: string; projectRoot: string }) =>
+      dbAddProjectDeployments(a.skillId, [{ runtime: a.runtime, projectRoot: a.projectRoot }]),
+    onSuccess: () => {
+      setProjectInstallSkill(null);
+      setProjectInstallPath("");
+      queryClient.invalidateQueries({ queryKey: ["db-skills"] });
+      toast.info(t("mySkills.projectAdded"));
+    },
+    onError: (err) => toast.danger(String((err as { message?: string })?.message ?? err)),
+  });
   const remove = useMutation({
     mutationFn: (skillId: string) => dbUnmanageSkill(skillId),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["db-skills"] }),
@@ -223,6 +238,7 @@ export function MySkillsPage() {
   });
   const list = skills.data ?? [];
   const tools = (runtimes.data ?? []).filter((r) => r.exists);
+  const projectRuntimeChoices = tools.length ? tools.map((tool) => tool.id) : ["codex", "claude-code"];
   const totalEnabled = list.reduce(
     (sum, s) => sum + s.targets.filter((tg) => tg.enabled && INSTALL_TARGET_IDS.has(tg.runtime)).length,
     0,
@@ -298,6 +314,23 @@ export function MySkillsPage() {
     }
   };
 
+  const handleChooseProjectInstallFolder = async () => {
+    try {
+      const selected = await selectProjectDirectory();
+      if (selected) setProjectInstallPath(selected);
+    } catch (err) {
+      toast.danger(String((err as { message?: string })?.message ?? err));
+    }
+  };
+
+  const openProjectInstallDialog = (skill: ManagedSkill) => {
+    setProjectInstallSkill(skill);
+    setProjectInstallPath("");
+    setProjectInstallRuntime((current) =>
+      projectRuntimeChoices.includes(current) ? current : (projectRuntimeChoices[0] ?? "codex"),
+    );
+  };
+
   const customImportPending = importSkill.isPending && importSkill.variables?.skillId === "";
   const customProjectTargets =
     customProjectInstall && customProjectPath.trim()
@@ -344,6 +377,7 @@ export function MySkillsPage() {
           <Modal.Backdrop>
             <Modal.Container size="lg">
               <Modal.Dialog className="rounded-[12px] bg-[var(--bg-elevated)] outline-none">
+                <Modal.CloseTrigger />
                 <Modal.Header className="border-b border-[var(--line)] px-5 py-4">
                   <Modal.Heading className="text-[15px] font-semibold tracking-tight">
                     {t("local.unmanaged")}
@@ -423,7 +457,7 @@ export function MySkillsPage() {
                             </Button>
                           </div>
                           <div className="flex flex-wrap gap-1.5">
-                            {(tools.length ? tools.map((tool) => tool.id) : ["codex", "claude-code"]).map((runtime) => (
+                            {projectRuntimeChoices.map((runtime) => (
                               <button
                                 key={runtime}
                                 type="button"
@@ -551,6 +585,101 @@ export function MySkillsPage() {
           </Modal.Backdrop>
         </Modal>
 
+        <Modal
+          isOpen={Boolean(projectInstallSkill)}
+          onOpenChange={(open) => {
+            if (!open) {
+              setProjectInstallSkill(null);
+              setProjectInstallPath("");
+            }
+          }}
+        >
+          <Modal.Backdrop>
+            <Modal.Container size="md">
+              <Modal.Dialog className="rounded-[12px] bg-[var(--bg-elevated)] outline-none">
+                <Modal.CloseTrigger />
+                <Modal.Header className="border-b border-[var(--line)] px-5 py-4">
+                  <Modal.Heading className="text-[15px] font-semibold tracking-tight">
+                    {t("mySkills.projectAddTitle").replace("{name}", projectInstallSkill?.name ?? "")}
+                  </Modal.Heading>
+                  <p className="mt-1 text-[12px] text-[var(--fg-muted)]">{t("mySkills.projectAddDesc")}</p>
+                </Modal.Header>
+
+                <Modal.Body className="space-y-4 px-5 py-4">
+                  <section>
+                    <div className="mb-2 text-[12px] font-medium text-[var(--fg-secondary)]">
+                      {t("install.projectRoot")}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <input
+                        value={projectInstallPath}
+                        onChange={(event) => setProjectInstallPath(event.target.value)}
+                        placeholder={t("install.projectRoot.placeholder")}
+                        className="min-w-0 flex-1 rounded-md border border-[var(--line)] bg-[var(--bg-elevated)] px-3 py-2 font-mono text-[12px] outline-none focus:border-[var(--brand)] focus:ring-2 focus:ring-[var(--brand-soft)]"
+                      />
+                      <Button size="sm" variant="outline" onPress={handleChooseProjectInstallFolder}>
+                        <FolderOpen size={13} />
+                        {t("local.chooseFolder")}
+                      </Button>
+                    </div>
+                    <div className="mt-1.5 text-[11px] text-[var(--fg-muted)]">
+                      {t("install.projectRoot.desc")}
+                    </div>
+                  </section>
+
+                  <section>
+                    <div className="mb-2 text-[12px] font-medium text-[var(--fg-secondary)]">
+                      {t("install.projectRuntime")}
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      {projectRuntimeChoices.map((runtime) => {
+                        const selected = projectInstallRuntime === runtime;
+                        return (
+                          <button
+                            key={runtime}
+                            type="button"
+                            onClick={() => setProjectInstallRuntime(runtime)}
+                            className={cn(
+                              "rounded-md border px-3 py-2 text-left text-[12.5px] transition-colors",
+                              selected
+                                ? "border-[var(--brand)] bg-[var(--brand-soft)] text-[var(--brand-fg)]"
+                                : "border-[var(--line)] bg-[var(--bg-elevated)] text-[var(--fg)] hover:bg-[var(--bg-soft)]",
+                            )}
+                          >
+                            {TOOL_LABELS[runtime] ?? runtime}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </section>
+                </Modal.Body>
+
+                <div className="flex justify-end gap-2 border-t border-[var(--line)] px-5 py-3">
+                  <Button size="sm" variant="outline" onPress={() => setProjectInstallSkill(null)}>
+                    {t("common.cancel")}
+                  </Button>
+                  <Button
+                    size="sm"
+                    isDisabled={!projectInstallSkill || !projectInstallPath.trim()}
+                    isPending={addProjectDeployment.isPending}
+                    onPress={() => {
+                      if (!projectInstallSkill) return;
+                      addProjectDeployment.mutate({
+                        skillId: projectInstallSkill.id,
+                        runtime: projectInstallRuntime,
+                        projectRoot: projectInstallPath.trim(),
+                      });
+                    }}
+                  >
+                    <FolderPlus size={13} />
+                    {t("mySkills.projectAddConfirm")}
+                  </Button>
+                </div>
+              </Modal.Dialog>
+            </Modal.Container>
+          </Modal.Backdrop>
+        </Modal>
+
         {/* Skill list */}
         {list.length === 0 ? (
           <div className="empty-state rounded-md border border-dashed border-[var(--line)]">
@@ -579,6 +708,7 @@ export function MySkillsPage() {
                   toggleProjectDeployment.mutate({ deploymentId, enabled })
                 }
                 onDeleteProjectDeployment={(deploymentId) => deleteProjectDeployment.mutate(deploymentId)}
+                onAddProjectInstall={() => openProjectInstallDialog(skill)}
                 onRemove={() => remove.mutate(skill.id)}
                 removing={remove.isPending && remove.variables === skill.id}
                 onRetry={() => retry.mutate(skill)}
@@ -857,6 +987,7 @@ function SkillCard({
   deletingProjectDeploymentId,
   onToggleProjectDeployment,
   onDeleteProjectDeployment,
+  onAddProjectInstall,
   onRemove,
   removing,
   onRetry,
@@ -875,6 +1006,7 @@ function SkillCard({
   deletingProjectDeploymentId: number | null;
   onToggleProjectDeployment: (deploymentId: number, enabled: boolean) => void;
   onDeleteProjectDeployment: (deploymentId: number) => void;
+  onAddProjectInstall: () => void;
   onRemove: () => void;
   removing: boolean;
   onRetry: () => void;
@@ -1072,6 +1204,18 @@ function SkillCard({
                 </label>
               );
             })}
+            <Tooltip delay={150}>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-[34px] px-2.5 text-[var(--fg-secondary)] hover:text-[var(--brand)]"
+                onPress={onAddProjectInstall}
+                aria-label={t("mySkills.projectAdd")}
+              >
+                <FolderPlus size={14} />
+              </Button>
+              <Tooltip.Content>{t("mySkills.projectAdd")}</Tooltip.Content>
+            </Tooltip>
           </div>
 
           {projectDeployments.length ? (

@@ -22,7 +22,7 @@ import {
   type FileContent,
   type SkillAsset,
   type SkillDetail as SkillDetailData,
-} from "../lib/teamai";
+} from "../lib/skill-library";
 import { useLocale } from "../hooks/useLocale";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { getFileContentFromCache, putFileContentInCache } from "../lib/workspaceCache";

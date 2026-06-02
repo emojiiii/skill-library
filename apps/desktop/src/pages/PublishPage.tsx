@@ -18,7 +18,7 @@ import {
   listWorkspacePullRequestFiles,
   listWorkspacePullRequests,
   mergeWorkspacePullRequest,
-} from "../lib/teamai";
+} from "../lib/skill-library";
 import { formatRelativeTime, openExternalUrl } from "../utils/format";
 import { Card } from "../widgets/Card";
 import { MetricTile } from "../widgets/MetricTile";
@@ -519,4 +519,4 @@ function PullRequestDetail({
 }
 
 // keep these re-exports for backward-compat with old App.tsx references
-export type { WorkspacePullRequest as PublishRequestRecord, WorkspacePullRequest as PublishPolicyCheckRecord } from "../lib/teamai";
+export type { WorkspacePullRequest as PublishRequestRecord, WorkspacePullRequest as PublishPolicyCheckRecord } from "../lib/skill-library";

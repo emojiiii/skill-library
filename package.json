@@ -1,5 +1,5 @@
 {
-  "name": "team-ai-hub",
+  "name": "skill-library",
   "private": true,
   "packageManager": "pnpm@9.15.4",
   "scripts": {
@@ -10,8 +10,8 @@
     "demo:real-provider": "scripts/demo-real-provider.sh --execute",
     "demo:real-provider:dry-run": "scripts/demo-real-provider.sh --dry-run",
     "demo:verify-evidence": "scripts/verify-demo-evidence.sh",
-    "dev": "pnpm --filter @teamai/desktop tauri dev",
-    "dev:web": "pnpm --filter @teamai/desktop dev",
+    "dev": "pnpm --filter @skill-library/desktop tauri dev",
+    "dev:web": "pnpm --filter @skill-library/desktop dev",
     "lint": "pnpm -r lint",
     "smoke:cli-keypath": "scripts/smoke-cli-keypath.sh",
     "smoke:diagnostics": "scripts/smoke-diagnostics.sh",

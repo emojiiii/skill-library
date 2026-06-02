@@ -1,7 +1,7 @@
 import { Button } from "@heroui/react";
 import { PackageOpen, Terminal } from "lucide-react";
 import { useLocale } from "../hooks/useLocale";
-import type { DiagnosticsExport } from "../lib/teamai";
+import type { DiagnosticsExport } from "../lib/skill-library";
 import { Card } from "../widgets/Card";
 import { MetricTile } from "../widgets/MetricTile";
 import { Pill } from "../widgets/Pill";
@@ -32,7 +32,7 @@ export function CliPage({
             <div className="min-w-0">
               <Card.Title>{t("cli.diagnostics")}</Card.Title>
               <Card.Subtitle className="truncate">
-                {diagnostics?.outputDir ?? "~/.team-ai-hub/tmp/diagnostics"}
+                {diagnostics?.outputDir ?? "~/.skill-library/tmp/diagnostics"}
               </Card.Subtitle>
             </div>
             <div className="flex flex-wrap justify-end gap-2">

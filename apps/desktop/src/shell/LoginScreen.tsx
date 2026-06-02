@@ -1,9 +1,10 @@
 import { Button, Input } from "@heroui/react";
-import { Box, KeyRound, ShieldAlert } from "lucide-react";
+import { KeyRound, ShieldAlert } from "lucide-react";
 import { useState } from "react";
+import appIconUrl from "../assets/app-icon.png";
 import { useLocale } from "../hooks/useLocale";
-import type { GitHubDeviceStartResult } from "../lib/teamai";
-import { isTauri } from "../lib/teamai";
+import type { GitHubDeviceStartResult } from "../lib/skill-library";
+import { isTauri } from "../lib/skill-library";
 import { DeviceCodePanel } from "../widgets/DeviceCodePanel";
 import { Pill } from "../widgets/Pill";
 
@@ -46,9 +47,12 @@ export function LoginScreen({
     <div className="login-screen">
       <div className="login-card">
         <div className="flex items-center gap-3">
-          <div className="grid size-10 place-items-center rounded-[10px] bg-[#0f1115] text-white">
-            <Box size={18} />
-          </div>
+          <img
+            src={appIconUrl}
+            alt=""
+            draggable={false}
+            className="size-10 rounded-[10px]"
+          />
           <div>
             <div className="text-[16px] font-semibold tracking-tight">{t("login.title")}</div>
             <div className="text-[12px] text-[var(--fg-muted)]">{t("login.subtitle")}</div>

@@ -14,12 +14,12 @@ import {
   type CachedFileResult,
   type AiReviewFinding,
   type RemoteCacheStat,
-} from "./teamai";
+} from "./skill-library";
 
-const CACHE_PREFIX = "teamai-ws-cache:";
-const TREE_PREFIX = "teamai-tree:";
-const DETAIL_PREFIX = "teamai-detail:";
-const REVIEW_PREFIX = "teamai-review:";
+const CACHE_PREFIX = "skill-library-ws-cache:";
+const TREE_PREFIX = "skill-library-tree:";
+const DETAIL_PREFIX = "skill-library-detail:";
+const REVIEW_PREFIX = "skill-library-review:";
 
 // ---------------------------------------------------------------------------
 // Helpers: encode/decode JSON ↔ base64 for SQLite BLOB storage (metadata only)
@@ -287,7 +287,7 @@ export async function clearReviewCache(workspace: string, skillPath: string): Pr
 }
 
 // ---------------------------------------------------------------------------
-// File content cache — stored as real files on disk (~/.team-ai-hub/remote/)
+// File content cache — stored as real files on disk (~/.skill-library/remote/)
 // ---------------------------------------------------------------------------
 
 export interface CachedFileContent {
@@ -409,7 +409,7 @@ export async function getCacheSizeByWorkspace(): Promise<{ workspaces: Workspace
 // Discussions enabled status cache (per workspace)
 // ---------------------------------------------------------------------------
 
-const DISCUSSIONS_PREFIX = "teamai-discussions-enabled:";
+const DISCUSSIONS_PREFIX = "skill-library-discussions-enabled:";
 
 function discussionsKey(workspace: string): string {
   return `${DISCUSSIONS_PREFIX}${workspace}`;
@@ -437,7 +437,7 @@ export async function setDiscussionsEnabledCache(workspace: string, enabled: boo
 // Skills list cache (per workspace) — avoids skeleton flash on startup
 // ---------------------------------------------------------------------------
 
-const SKILLS_LIST_PREFIX = "teamai-skills-list:";
+const SKILLS_LIST_PREFIX = "skill-library-skills-list:";
 
 function skillsListKey(workspace: string): string {
   return `${SKILLS_LIST_PREFIX}${workspace}`;
@@ -466,7 +466,7 @@ export async function setSkillsListCache(workspace: string, skills: unknown[]): 
 // Avoids scanning all 100 discussions every time we open comments tab
 // ---------------------------------------------------------------------------
 
-const DISCUSSION_MAP_PREFIX = "teamai-discussion-map:";
+const DISCUSSION_MAP_PREFIX = "skill-library-discussion-map:";
 
 /** Cache TTL: 24 hours — after this, we re-validate via full scan */
 const DISCUSSION_MAP_TTL_MS = 24 * 60 * 60 * 1000;

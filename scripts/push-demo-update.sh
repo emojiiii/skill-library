@@ -6,17 +6,17 @@ usage() {
 Usage:
   scripts/push-demo-update.sh [REPO_DIR]
 
-Creates and pushes the Team AI Hub demo update tag v1.2.1.
+Creates and pushes the Skill Library demo update tag v1.2.1.
 
 Default REPO_DIR:
-  ./team-ai-hub-demo-skills
+  ./skill-library-demo-skills
 
 This script is intended for the final real-provider demo after the initial
 repository with v1.0.0, v1.1.0, and v1.2.0 has already been pushed.
 USAGE
 }
 
-repo_dir="team-ai-hub-demo-skills"
+repo_dir="skill-library-demo-skills"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -56,6 +56,6 @@ cat <<EOF
 Pushed demo update from: $PWD
 
 Evidence step:
-  rtk cargo run -p teamai-cli -- notifications --repository OWNER/team-ai-hub-demo-skills
-  rtk cargo run -p teamai-cli -- sync --pull-notifications --yes
+  rtk cargo run -p skill-library-cli -- notifications --repository OWNER/skill-library-demo-skills
+  rtk cargo run -p skill-library-cli -- sync --pull-notifications --yes
 EOF

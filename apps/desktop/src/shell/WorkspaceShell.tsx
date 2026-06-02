@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { Button } from "@heroui/react";
 import { PackageOpen } from "lucide-react";
-import { getAuthStatus, listWorkspaces } from "../lib/teamai";
+import { getAuthStatus, listWorkspaces } from "../lib/skill-library";
 import { WorkspaceProvider, type WorkspaceContextValue } from "../context/WorkspaceContext";
 import { useAppStore } from "../state/appStore";
 import { useLocale } from "../hooks/useLocale";

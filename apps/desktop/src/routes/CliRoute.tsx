@@ -1,5 +1,5 @@
 import { useMutation } from "@tanstack/react-query";
-import { exportDiagnostics, openLogsFolder } from "../lib/teamai";
+import { exportDiagnostics, openLogsFolder } from "../lib/skill-library";
 import { CliPage } from "../pages/CliPage";
 import { formatError } from "../utils/format";
 

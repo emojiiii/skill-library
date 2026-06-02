@@ -1,8 +1,8 @@
 import { Button, Input, Modal } from "@heroui/react";
-import { Box, KeyRound, ShieldAlert, X } from "lucide-react";
+import { Github, KeyRound, ShieldAlert } from "lucide-react";
 import { useState } from "react";
 import { useLocale } from "../hooks/useLocale";
-import type { GitHubDeviceStartResult } from "../lib/teamai";
+import type { GitHubDeviceStartResult } from "../lib/skill-library";
 import { DeviceCodePanel } from "../widgets/DeviceCodePanel";
 import { Pill } from "../widgets/Pill";
 
@@ -54,36 +54,30 @@ export function AuthDialog({
   return (
     <Modal isOpen={open} onOpenChange={onOpenChange}>
       <Modal.Backdrop>
-        <Modal.Container size="md">
-          <Modal.Dialog className="rounded-[12px] bg-[var(--bg-elevated)] outline-none">
-            <Modal.Header className="flex items-start justify-between gap-3 border-b border-[var(--line)] px-5 py-4">
-              <div className="flex items-center gap-3">
-                <div className="grid size-9 place-items-center rounded-[10px] bg-[#0f1115] text-white">
-                  <Box size={16} />
+        <Modal.Container size="sm">
+          <Modal.Dialog className="auth-dialog">
+            <Modal.CloseTrigger />
+            <Modal.Header className="auth-dialog__header">
+              <div className="auth-dialog__identity">
+                <div className="auth-dialog__mark">
+                  <Github size={18} />
                 </div>
-                <div>
-                  <Modal.Heading className="text-[15px] font-semibold tracking-tight">
+                <div className="min-w-0">
+                  <Modal.Heading className="auth-dialog__title">
                     {t("auth.account")}
                   </Modal.Heading>
-                  <div className="mt-0.5 text-[12px] text-[var(--fg-muted)]">
+                  <div className="auth-dialog__subtitle">
                     {authLogin ? t("auth.signedInAs").replace("{login}", authLogin) : t("auth.connectGithub")}
                   </div>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={() => onOpenChange(false)}
-                className="rounded-md p-1 text-[var(--fg-muted)] hover:bg-[var(--bg-soft)]"
-              >
-                <X size={14} />
-              </button>
             </Modal.Header>
 
-            <Modal.Body className="space-y-4 px-5 py-4">
+            <Modal.Body className="auth-dialog__body">
               {authLogin ? (
-                <div className="flex items-center justify-between gap-3 rounded-md border border-[var(--line)] bg-[var(--bg-soft)] px-3 py-2.5">
+                <div className="auth-dialog__account-card">
                   <div className="flex items-center gap-2.5">
-                    <span className="grid size-8 place-items-center rounded-full bg-[var(--brand-soft)] text-[11px] font-semibold text-[var(--brand-fg)]">
+                    <span className="auth-dialog__avatar">
                       {authLogin.slice(0, 2).toUpperCase()}
                     </span>
                     <div>
@@ -108,13 +102,13 @@ export function AuthDialog({
               ) : (
                 <>
                   {intentReason ? (
-                    <div className="rounded-md border border-[var(--brand)] bg-[var(--brand-soft)] px-3 py-2.5 text-[12.5px] text-[var(--brand-fg)]">
+                    <div className="auth-dialog__intent">
                       {intentReason}
                     </div>
                   ) : null}
                   <Button
                     fullWidth
-                    className="h-11"
+                    className="auth-dialog__primary"
                     onPress={onStartDevice}
                     isPending={startPending || pollPending}
                   >
@@ -124,17 +118,17 @@ export function AuthDialog({
 
                   {device ? <DeviceCodePanel device={device} status={deviceStatus} /> : null}
 
-                  <div>
+                  <div className="auth-dialog__token-section">
                     <button
                       type="button"
                       onClick={() => setShowTokenForm((value) => !value)}
-                      className="flex items-center gap-2 text-[12px] font-medium text-[var(--fg-secondary)] hover:text-[var(--fg)]"
+                      className="auth-dialog__token-trigger"
                     >
                       <ShieldAlert size={13} />
                       {t("auth.useToken")}
                     </button>
                     {showTokenForm ? (
-                      <div className="mt-3 rounded-md border border-[var(--line)] p-3">
+                      <div className="auth-dialog__token-panel">
                         <div className="grid grid-cols-[1fr_auto] gap-2">
                           <Input
                             aria-label={t("auth.githubTokenAria")}
@@ -164,7 +158,7 @@ export function AuthDialog({
               )}
 
               {errors.length ? (
-                <div className="rounded-md border border-[var(--danger)] bg-[var(--danger-soft)] px-3 py-2 text-[12px] text-[var(--danger)]">
+                <div className="auth-dialog__error">
                   {errors.map((error, idx) => (
                     <div key={`${idx}:${error}`}>{error}</div>
                   ))}

@@ -17,6 +17,7 @@ import {
   listLocalAgentRoots,
   listWorkspaces,
   loginGithubToken,
+  logoutGithub,
   onDeepLink,
   openLogsFolder,
   pollGithubDeviceFlow,
@@ -26,7 +27,7 @@ import {
   startGithubDeviceFlow,
   subscribeWorkspaceSkill,
   type GitHubDeviceStartResult,
-} from "../lib/teamai";
+} from "../lib/skill-library";
 import { LoginScreen } from "./LoginScreen";
 import { Sidebar } from "./Sidebar";
 import { AuthDialog } from "./AuthDialog";
@@ -71,7 +72,6 @@ export function RootLayout() {
   const setDismissedError = useAppStore((s) => s.setDismissedError);
   const authIntent = useAppStore((s) => s.authIntent);
   const clearAuthIntent = useAppStore((s) => s.clearAuthIntent);
-  const requestAuth = useAppStore((s) => s.requestAuth);
 
   // --- Route-derived ---
   const pathname = useRouterState({ select: (s) => s.location.pathname });
@@ -120,6 +120,15 @@ export function RootLayout() {
       githubRepos.refetch();
       setAuthDialogOpen(false);
       resumeAuthIntent();
+    },
+  });
+
+  const githubLogout = useMutation({
+    mutationFn: logoutGithub,
+    onSuccess: () => {
+      setSettingsOpen(false);
+      auth.refetch();
+      githubRepos.refetch();
     },
   });
 
@@ -277,6 +286,7 @@ export function RootLayout() {
     (addRemoteWorkspace.error ? formatError(addRemoteWorkspace.error) : null) ??
     (addManualWorkspace.error ? formatError(addManualWorkspace.error) : null) ??
     (githubLogin.error ? formatError(githubLogin.error) : null) ??
+    (githubLogout.error ? formatError(githubLogout.error) : null) ??
     (githubDeviceStart.error ? formatError(githubDeviceStart.error) : null) ??
     (githubDevicePoll.error ? formatError(githubDevicePoll.error) : null);
   const showGlobalError = Boolean(globalError && globalError !== dismissedError);
@@ -347,11 +357,7 @@ export function RootLayout() {
         counts={navCounts}
         authLogin={auth.data?.githubLogin}
         isCreatorMode={isAuthenticated}
-        onOpenAccount={() =>
-          isAuthenticated
-            ? setSettingsOpen(true)
-            : requestAuth({ action: "manage" })
-        }
+        onOpenAccount={() => setSettingsOpen(true)}
       />
 
       <main className="app-shell__main" onMouseDown={handleDragMouseDown}>
@@ -464,10 +470,13 @@ export function RootLayout() {
         onOpenChange={setSettingsOpen}
         authLogin={auth.data?.githubLogin}
         authScopes={auth.data?.githubScopes ?? []}
-        onLogout={() => {
+        onLogin={() => {
+          clearAuthIntent();
           setSettingsOpen(false);
-          auth.refetch();
+          setAuthDialogOpen(true);
         }}
+        logoutPending={githubLogout.isPending}
+        onLogout={() => githubLogout.mutate()}
       />
     </div>
   );

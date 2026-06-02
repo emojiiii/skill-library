@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react";
 import type { AppSettings } from "../shell/SettingsDialog";
 
-const STORAGE_KEY = "teamai-settings";
+const STORAGE_KEY = "skill-library-settings";
 
 // ---------------------------------------------------------------------------
 // Translations
@@ -109,6 +109,11 @@ const zh: Record<string, string> = {
   "mySkills.removeDesc": "会从本地技能库移除这条记录，并恢复或清理已安装到工具里的目标。",
   "mySkills.remove.confirm": "确认移除",
   "mySkills.projects": "项目安装",
+  "mySkills.projectAdd": "安装到项目",
+  "mySkills.projectAddTitle": "将 {name} 安装到项目",
+  "mySkills.projectAddDesc": "把这个已管理的 skill 链接到所选项目的运行时 skills 目录。",
+  "mySkills.projectAddConfirm": "安装到项目",
+  "mySkills.projectAdded": "已添加项目安装",
   "mySkills.projectActive": "正常",
   "mySkills.projectPaused": "已暂停",
   "mySkills.projectMissing": "已缺失",
@@ -161,7 +166,7 @@ const zh: Record<string, string> = {
   "page.activity.title": "动态",
   "page.activity.subtitle": "查看 provider webhook 更新和同步轮询输入。",
   "page.cli.title": "CLI",
-  "page.cli.subtitle": "从 Rust CLI 运行本地优先的 Team AI Hub 工作流。",
+  "page.cli.subtitle": "从 Rust CLI 运行本地优先的 Skill Library 工作流。",
 
   // --- Sidebar ---
   "sidebar.githubConnected": "GitHub 已连接",
@@ -169,7 +174,7 @@ const zh: Record<string, string> = {
   "sidebar.signInToContribute.desc": "解锁发布与贡献",
 
   // --- Login ---
-  "login.title": "Team AI Hub",
+  "login.title": "Skill Library",
   "login.subtitle": "Git 驱动的 Skills 工作区",
   "login.heading": "登录以继续",
   "login.description": "通过 GitHub 登录以访问你的团队工作区和 skills。",
@@ -232,6 +237,8 @@ const zh: Record<string, string> = {
   "settings.githubAccount": "GitHub 账户",
   "settings.connected": "已连接",
   "settings.notConnected": "未连接",
+  "settings.login": "登录 GitHub",
+  "settings.login.desc": "连接后可发布、评论和访问私有仓库。",
   "settings.scopes": "权限范围",
   "settings.scopes.desc": "当前 token 的 GitHub scopes",
   "settings.logout": "退出登录",
@@ -424,7 +431,7 @@ const zh: Record<string, string> = {
   "publishPage.openOnGithub": "在 GitHub 上打开",
   "publishPage.merge": "合并",
   "publishPage.mergeTitle": "合并 Pull Request",
-  "publishPage.mergeDesc": "将使用 squash merge 合并这个 PR。若 head 分支是 Team AI Hub 创建的临时分支，合并成功后会自动删除。",
+  "publishPage.mergeDesc": "将使用 squash merge 合并这个 PR。若 head 分支是 Skill Library 创建的临时分支，合并成功后会自动删除。",
   "publishPage.confirmMerge": "确认合并",
   "publishPage.rejectClose": "拒绝并关闭",
   "publishPage.closeTitle": "关闭 Pull Request",
@@ -534,6 +541,11 @@ const zh: Record<string, string> = {
   "auth.useToken": "使用个人访问令牌",
   "auth.save": "保存",
   "auth.githubTokenAria": "GitHub token",
+  "auth.reason.comment": "登录后即可评论和点赞。",
+  "auth.reason.publish": "登录后即可发布更改。",
+  "auth.reason.invite": "登录后即可邀请成员。",
+  "auth.reason.browsePrivate": "登录后即可访问私有仓库。",
+  "auth.reason.manage": "登录后即可管理账户连接。",
 
   // --- Device Code Panel ---
   "device.step1": "复制你的一次性代码",
@@ -737,6 +749,11 @@ const en: Record<string, string> = {
   "mySkills.removeDesc": "This removes the skill from the local library and restores or cleans up installed tool targets.",
   "mySkills.remove.confirm": "Remove",
   "mySkills.projects": "Project installs",
+  "mySkills.projectAdd": "Install to project",
+  "mySkills.projectAddTitle": "Install {name} to a project",
+  "mySkills.projectAddDesc": "Link this managed skill into a selected project runtime skills folder.",
+  "mySkills.projectAddConfirm": "Install to project",
+  "mySkills.projectAdded": "Project install added",
   "mySkills.projectActive": "Active",
   "mySkills.projectPaused": "Paused",
   "mySkills.projectMissing": "Missing",
@@ -789,7 +806,7 @@ const en: Record<string, string> = {
   "page.activity.title": "Activity",
   "page.activity.subtitle": "Review provider webhook updates and sync polling inputs.",
   "page.cli.title": "CLI",
-  "page.cli.subtitle": "Run local-first Team AI Hub workflows from the Rust CLI.",
+  "page.cli.subtitle": "Run local-first Skill Library workflows from the Rust CLI.",
 
   // --- Sidebar ---
   "sidebar.githubConnected": "GitHub connected",
@@ -797,7 +814,7 @@ const en: Record<string, string> = {
   "sidebar.signInToContribute.desc": "Unlock publishing & contributing",
 
   // --- Login ---
-  "login.title": "Team AI Hub",
+  "login.title": "Skill Library",
   "login.subtitle": "Git-backed skills workspace",
   "login.heading": "Sign in to continue",
   "login.description": "Continue with GitHub to access your team workspaces and skills.",
@@ -860,6 +877,8 @@ const en: Record<string, string> = {
   "settings.githubAccount": "GitHub account",
   "settings.connected": "Connected",
   "settings.notConnected": "Not connected",
+  "settings.login": "Sign in to GitHub",
+  "settings.login.desc": "Connect to publish, comment, and access private repositories.",
   "settings.scopes": "Scopes",
   "settings.scopes.desc": "Current token GitHub scopes",
   "settings.logout": "Sign out",
@@ -1052,7 +1071,7 @@ const en: Record<string, string> = {
   "publishPage.openOnGithub": "Open on GitHub",
   "publishPage.merge": "Merge",
   "publishPage.mergeTitle": "Merge pull request",
-  "publishPage.mergeDesc": "This will squash merge the PR. If the head branch is a temporary branch created by Team AI Hub, it will be deleted after a successful merge.",
+  "publishPage.mergeDesc": "This will squash merge the PR. If the head branch is a temporary branch created by Skill Library, it will be deleted after a successful merge.",
   "publishPage.confirmMerge": "Confirm merge",
   "publishPage.rejectClose": "Reject and close",
   "publishPage.closeTitle": "Close pull request",
@@ -1162,6 +1181,11 @@ const en: Record<string, string> = {
   "auth.useToken": "Use a personal access token instead",
   "auth.save": "Save",
   "auth.githubTokenAria": "GitHub token",
+  "auth.reason.comment": "Sign in to comment and react.",
+  "auth.reason.publish": "Sign in to publish changes.",
+  "auth.reason.invite": "Sign in to invite members.",
+  "auth.reason.browsePrivate": "Sign in to access private repositories.",
+  "auth.reason.manage": "Sign in to manage account connections.",
 
   // --- Device Code Panel ---
   "device.step1": "Copy your one-time code",
@@ -1298,7 +1322,7 @@ function subscribe(cb: () => void) {
   return () => { listeners.delete(cb); };
 }
 
-window.addEventListener("teamai-settings-changed", () => {
+window.addEventListener("skill-library-settings-changed", () => {
   currentLocale = resolveLocale(getLanguageSetting());
   listeners.forEach((cb) => cb());
 });

@@ -10,7 +10,7 @@ import {
   readSkillFile,
   type FileContent,
   type SkillDetail as SkillDetailData,
-} from "../lib/teamai";
+} from "../lib/skill-library";
 import { getFileContentFromCache, putFileContentInCache } from "../lib/workspaceCache";
 import { useLocale } from "../hooks/useLocale";
 import { formatError } from "../utils/format";

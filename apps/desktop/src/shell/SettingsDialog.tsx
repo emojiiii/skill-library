@@ -2,6 +2,7 @@ import { Button, Input, Modal, toast } from "@heroui/react";
 import {
   Database,
   FolderOpen,
+  LogIn,
   LogOut,
   Settings,
   Shield,
@@ -21,16 +22,16 @@ import {
   openDataDir,
   saveAiKey,
   type CacheSizeInfo,
-} from "../lib/teamai";
+} from "../lib/skill-library";
 
 type SettingsSection = "general" | "network" | "ai" | "cache" | "account" | "about";
 
 const sectionDefs: Array<{ id: SettingsSection; labelKey: string; icon: ReactNode }> = [
+  { id: "account", labelKey: "settings.account", icon: <User size={15} /> },
   { id: "general", labelKey: "settings.general", icon: <Settings size={15} /> },
   { id: "network", labelKey: "settings.network", icon: <Wifi size={15} /> },
   { id: "ai", labelKey: "settings.ai", icon: <Sparkles size={15} /> },
   { id: "cache", labelKey: "settings.cache", icon: <Database size={15} /> },
-  { id: "account", labelKey: "settings.account", icon: <User size={15} /> },
   { id: "about", labelKey: "settings.about", icon: <Shield size={15} /> },
 ];
 
@@ -83,7 +84,7 @@ export function getActiveAiConfig(settings: AppSettings): { provider: string; ba
 
 function loadSettings(): AppSettings {
   try {
-    const raw = localStorage.getItem("teamai-settings");
+    const raw = localStorage.getItem("skill-library-settings");
     if (raw) {
       const parsed = JSON.parse(raw);
       // Migrate from old flat format (aiBaseUrl/aiModel) to nested aiConfigs
@@ -109,7 +110,7 @@ function loadSettings(): AppSettings {
 }
 
 function saveSettings(settings: AppSettings) {
-  localStorage.setItem("teamai-settings", JSON.stringify(settings));
+  localStorage.setItem("skill-library-settings", JSON.stringify(settings));
   notifySettingsChanged();
 }
 
@@ -118,16 +119,20 @@ export function SettingsDialog({
   onOpenChange,
   authLogin,
   authScopes,
+  onLogin,
+  logoutPending,
   onLogout,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   authLogin: string | null | undefined;
   authScopes: string[];
+  onLogin: () => void;
+  logoutPending?: boolean;
   onLogout: () => void;
 }) {
   const { t } = useLocale();
-  const [section, setSection] = useState<SettingsSection>("general");
+  const [section, setSection] = useState<SettingsSection>("account");
   const [settings, setSettings] = useState<AppSettings>(loadSettings);
 
   const update = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
@@ -141,6 +146,7 @@ export function SettingsDialog({
       <Modal.Backdrop>
         <Modal.Container size="lg">
           <Modal.Dialog className="mx-auto rounded-[12px] bg-[var(--bg-elevated)] outline-none" style={{ width: 600, maxWidth: 600 }}>
+            <Modal.CloseTrigger />
             <Modal.Header className="border-b border-[var(--line)] px-5 py-4">
               <Modal.Heading className="text-[15px] font-semibold">{t("settings.title")}</Modal.Heading>
             </Modal.Header>
@@ -172,7 +178,7 @@ export function SettingsDialog({
                   ) : section === "cache" ? (
                     <CacheSection />
                   ) : section === "account" ? (
-                    <AccountSection authLogin={authLogin} authScopes={authScopes} onLogout={onLogout} />
+                    <AccountSection authLogin={authLogin} authScopes={authScopes} onLogin={onLogin} logoutPending={logoutPending} onLogout={onLogout} />
                   ) : (
                     <AboutSection />
                   )}
@@ -453,30 +459,57 @@ function AiSection({ settings, update }: { settings: AppSettings; update: <K ext
   );
 }
 
-function AccountSection({ authLogin, authScopes, onLogout }: { authLogin: string | null | undefined; authScopes: string[]; onLogout: () => void }) {
+function AccountSection({
+  authLogin,
+  authScopes,
+  onLogin,
+  logoutPending,
+  onLogout,
+}: {
+  authLogin: string | null | undefined;
+  authScopes: string[];
+  onLogin: () => void;
+  logoutPending?: boolean;
+  onLogout: () => void;
+}) {
   const { t } = useLocale();
   return (
     <div className="space-y-0">
       <h3 className="settings-section-title">{t("settings.account")}</h3>
-      <SettingsRow label={t("settings.githubAccount")} description={authLogin ? `${t("settings.connected")} @${authLogin}` : t("settings.notConnected")}>
+      <SettingsRow
+        label={t("settings.githubAccount")}
+        description={authLogin ? t("settings.connected") + " @" + authLogin : t("settings.notConnected")}
+      >
         <div className="flex items-center gap-2">
           <span className="grid size-7 place-items-center rounded-full bg-[var(--brand-soft)] text-[10px] font-semibold text-[var(--brand-fg)]">
             {(authLogin ?? "?").slice(0, 2).toUpperCase()}
           </span>
-          <span className="text-[12.5px] font-medium">{authLogin ? `@${authLogin}` : "—"}</span>
+          <span className="text-[12.5px] font-medium">{authLogin ? "@" + authLogin : t("settings.notConnected")}</span>
         </div>
       </SettingsRow>
-      {authScopes.length ? (
-        <SettingsRow label={t("settings.scopes")} description={t("settings.scopes.desc")}>
-          <span className="text-[12px] font-mono text-[var(--fg-muted)]">{authScopes.join(", ")}</span>
+
+      {authLogin ? (
+        <>
+          {authScopes.length ? (
+            <SettingsRow label={t("settings.scopes")} description={t("settings.scopes.desc")}>
+              <span className="text-[12px] font-mono text-[var(--fg-muted)]">{authScopes.join(", ")}</span>
+            </SettingsRow>
+          ) : null}
+          <SettingsRow label={t("settings.logout")} description={t("settings.logout.desc")}>
+            <Button size="sm" variant="outline" onPress={onLogout} isPending={logoutPending}>
+              <LogOut size={13} />
+              {t("settings.logout.btn")}
+            </Button>
+          </SettingsRow>
+        </>
+      ) : (
+        <SettingsRow label={t("settings.login")} description={t("settings.login.desc")}>
+          <Button size="sm" variant="secondary" onPress={onLogin}>
+            <LogIn size={13} />
+            {t("auth.continueWithGithub")}
+          </Button>
         </SettingsRow>
-      ) : null}
-      <SettingsRow label={t("settings.logout")} description={t("settings.logout.desc")}>
-        <Button size="sm" variant="outline" onPress={onLogout}>
-          <LogOut size={13} />
-          {t("settings.logout.btn")}
-        </Button>
-      </SettingsRow>
+      )}
     </div>
   );
 }
@@ -486,15 +519,15 @@ function AboutSection() {
   return (
     <div className="space-y-0">
       <h3 className="settings-section-title">{t("settings.about")}</h3>
-      <SettingsRow label={t("settings.version")} description="Team AI Hub Desktop">
+      <SettingsRow label={t("settings.version")} description="Skill Library Desktop">
         <span className="text-[12.5px] font-mono">0.1.0</span>
       </SettingsRow>
       <SettingsRow label={t("settings.runtime")} description="Tauri + React">
         <span className="text-[12.5px] font-mono">Tauri v2</span>
       </SettingsRow>
-      <SettingsRow label={t("settings.dataDir")} description="~/.team-ai-hub/">
+      <SettingsRow label={t("settings.dataDir")} description="~/.skill-library/">
         <div className="flex items-center gap-2">
-          <span className="text-[12px] font-mono text-[var(--fg-muted)]">~/.team-ai-hub/</span>
+          <span className="text-[12px] font-mono text-[var(--fg-muted)]">~/.skill-library/</span>
           <Button size="sm" variant="outline" onPress={() => openDataDir()}>
             <FolderOpen size={12} />
             {t("settings.dataDir.open")}
@@ -600,7 +633,7 @@ function CacheSection() {
             size="sm"
             variant="outline"
             onPress={() => {
-              const raw = localStorage.getItem("teamai-settings");
+              const raw = localStorage.getItem("skill-library-settings");
               if (raw) {
                 try {
                   const parsed = JSON.parse(raw);
@@ -608,7 +641,7 @@ function CacheSection() {
                     openai: { ...AI_PROVIDER_DEFAULTS.openai },
                     anthropic: { ...AI_PROVIDER_DEFAULTS.anthropic },
                   };
-                  localStorage.setItem("teamai-settings", JSON.stringify(parsed));
+                  localStorage.setItem("skill-library-settings", JSON.stringify(parsed));
                   notifySettingsChanged();
                   toast.success(t("settings.cache.aiConfig.success"));
                 } catch {

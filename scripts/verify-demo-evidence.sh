@@ -130,7 +130,7 @@ require_pattern "01-pnpm-check.log" "check" "pnpm check ran"
 require_pattern "02-pnpm-test.log" "passed|Test Files.*passed" "pnpm tests passed"
 require_pattern "03-login.log" "logged in|github|credential|@|user" "GitHub login completed"
 require_pattern "04-auth-status.log" "github|credential|login|scopes" "auth status captured"
-require_pattern "05-workspace-add.log" "team-ai-hub-demo-skills|workspace|webhook|added|saved" "workspace add captured"
+require_pattern "05-workspace-add.log" "skill-library-demo-skills|workspace|webhook|added|saved" "workspace add captured"
 require_pattern "06-scan-remote.log" "code-reviewer|pr-summarizer|skill" "remote scan found demo skills"
 require_pattern "07-subscribe.log" "code-reviewer|subscribed|subscription" "subscription captured"
 require_pattern "08-sync.log" "installed|sync|code-reviewer|lock" "sync captured"
@@ -139,7 +139,7 @@ require_pattern "10-versions.log" "v1\\.0\\.0|v1\\.1\\.0|v1\\.2\\.0" "versions o
 require_pattern "11-diff.log" "shell\\.execute\\.limited|permissions|code-reviewer" "diff shows permission semantic change"
 require_pattern "12-publish-pr.log" "pull|PR|publish|policy|auto" "publish PR output captured"
 require_pattern "14-push-update.log" "v1\\.2\\.1|push|Pushed demo update" "demo update push captured"
-require_pattern "15-notifications.log" "notification|workspace_updated|team-ai-hub-demo-skills|v1\\.2\\.1" "notification/update evidence captured"
+require_pattern "15-notifications.log" "notification|workspace_updated|skill-library-demo-skills|v1\\.2\\.1" "notification/update evidence captured"
 require_pattern "16-sync-after-update.log" "notifications|sync|v1\\.2\\.1|code-reviewer|installed" "post-update sync captured"
 require_pattern "17-status-after-update.log" "claude-code|cursor|codex|v1\\.2\\.1|code-reviewer|installed" "post-update target status captured"
 require_pattern "18-rollback.log" "rollback|v1\\.2\\.0|code-reviewer" "rollback output captured"
@@ -148,7 +148,7 @@ require_pattern "19-status-after-rollback.log" "claude-code|cursor|codex|v1\\.2\
 if compgen -G "$evidence_dir/13-invite.log" > /dev/null; then
   require_pattern "13-invite.log" "invite|pending|accepted|collaborator|invitation" "invitation output captured"
 else
-  fail "13-invite.log is missing; set TEAMAI_DEMO_INVITEE for the final demo run"
+  fail "13-invite.log is missing; set SKILL_LIBRARY_DEMO_INVITEE for the final demo run"
 fi
 
 screenshots=(

@@ -2,7 +2,7 @@ import { Button } from "@heroui/react";
 import { Check, Copy, ExternalLink } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useLocale } from "../hooks/useLocale";
-import type { GitHubDeviceStartResult } from "../lib/teamai";
+import type { GitHubDeviceStartResult } from "../lib/skill-library";
 import { openExternalUrl } from "../utils/format";
 import { Pill } from "./Pill";
 

@@ -1,7 +1,7 @@
 import { useEffect, useSyncExternalStore } from "react";
 import type { AppSettings } from "../shell/SettingsDialog";
 
-const STORAGE_KEY = "teamai-settings";
+const STORAGE_KEY = "skill-library-settings";
 
 function getSnapshot(): AppSettings {
   try {
@@ -26,13 +26,13 @@ window.addEventListener("storage", () => {
 });
 
 // Custom event for same-tab updates
-window.addEventListener("teamai-settings-changed", () => {
+window.addEventListener("skill-library-settings-changed", () => {
   cachedSettings = getSnapshot();
   listeners.forEach((cb) => cb());
 });
 
 export function notifySettingsChanged() {
-  window.dispatchEvent(new CustomEvent("teamai-settings-changed"));
+  window.dispatchEvent(new CustomEvent("skill-library-settings-changed"));
 }
 
 function getSystemDark() {

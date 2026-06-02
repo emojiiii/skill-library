@@ -1,4 +1,4 @@
-# Team AI Hub Tauri 技术方案
+# Skill Library Tauri 技术方案
 
 > 状态：v1 草案
 > 目标技术栈：Tauri v2 + Rust + React 19 + HeroUI v3 + Tailwind CSS v4
@@ -6,11 +6,11 @@
 
 ## 1. 结论
 
-Team AI Hub 的主客户端采用 **Tauri 桌面应用 + Rust 原生 core**：
+Skill Library 的主客户端采用 **Tauri 桌面应用 + Rust 原生 core**：
 
 - 不内置 Node / Bun。
 - 不完整重写 `npx skills`。
-- Rust 实现 Team AI Hub 需要的最小 Skill installer。
+- Rust 实现 Skill Library 需要的最小 Skill installer。
 - React + HeroUI 负责本地桌面 UI。
 - 云端只做 GitHub App / Bot / webhook / 元数据控制面。
 - CLI 作为 Tauri Rust core 的复用入口，不另起一套 Node CLI。
@@ -21,17 +21,17 @@ Team AI Hub 的主客户端采用 **Tauri 桌面应用 + Rust 原生 core**：
 
 ```mermaid
 flowchart LR
-    subgraph Desktop["Team AI Hub Desktop (Tauri)"]
+    subgraph Desktop["Skill Library Desktop (Tauri)"]
         UI["React + HeroUI<br/>桌面 UI"]
         Cmd["Tauri Commands<br/>IPC 边界"]
         Core["Rust Core"]
         Installer["Native Skill Installer"]
         LocalDB[("SQLite<br/>metadata / cache / queue")]
         Keychain["OS Keychain"]
-        FS["~/.team-ai-hub<br/>runtime skills dirs"]
+        FS["~/.skill-library<br/>runtime skills dirs"]
     end
 
-    subgraph Cloud["Team AI Hub Cloud / Self-hosted"]
+    subgraph Cloud["Skill Library Cloud / Self-hosted"]
         API["Control API"]
         Bot["GitHub App Bot<br/>PR / Invite / Webhook"]
         MetaDB[("Postgres")]
@@ -122,7 +122,7 @@ MVP 推荐：
 
 | Plugin | 用途 |
 |---|---|
-| `tauri-plugin-deep-link` | `teamai://subscribe`、OAuth callback、邀请 landing |
+| `tauri-plugin-deep-link` | `skill-library://subscribe`、OAuth callback、邀请 landing |
 | `tauri-plugin-single-instance` | 防止多实例；deep link 事件转发到已有窗口 |
 | `tauri-plugin-updater` | 桌面客户端自更新 |
 | `tauri-plugin-opener` | 打开 GitHub OAuth / PR / repo 页面 |
@@ -142,7 +142,7 @@ MVP 推荐：
 建议仓库结构：
 
 ```text
-team-ai-hub/
+skill-library/
 ├── apps/
 │   └── desktop/
 │       ├── src/                    # React + HeroUI
@@ -155,14 +155,14 @@ team-ai-hub/
 │       │       └── state.rs
 │       └── package.json
 ├── crates/
-│   ├── teamai-core/
-│   ├── teamai-provider/
-│   ├── teamai-provider-github/
-│   ├── teamai-installer/
-│   ├── teamai-manifest/
-│   ├── teamai-sync/
-│   ├── teamai-publish/
-│   └── teamai-cli/
+│   ├── skill-library-core/
+│   ├── skill-library-provider/
+│   ├── skill-library-provider-github/
+│   ├── skill-library-installer/
+│   ├── skill-library-manifest/
+│   ├── skill-library-sync/
+│   ├── skill-library-publish/
+│   └── skill-library-cli/
 ├── docs/
 └── Cargo.toml
 ```
@@ -171,21 +171,21 @@ Crate 职责：
 
 | Crate | 职责 |
 |---|---|
-| `teamai-core` | shared types、error、paths、config、event model |
-| `teamai-manifest` | `SKILL.md` frontmatter、`manifest.yaml/json` 解析与校验 |
-| `teamai-provider` | Provider trait、permission model、pagination、error mapping |
-| `teamai-provider-github` | GitHub REST/GraphQL、OAuth/device flow、tarball、diff |
-| `teamai-installer` | 原生 Skill installer、target paths、copy/symlink、list/remove |
-| `teamai-sync` | subscription、version resolution、lockfile、update policy、rollback |
-| `teamai-publish` | local Skill package、hash、risk summary、publish request |
-| `teamai-cli` | 复用 Rust core 的 headless CLI |
+| `skill-library-core` | shared types、error、paths、config、event model |
+| `skill-library-manifest` | `SKILL.md` frontmatter、`manifest.yaml/json` 解析与校验 |
+| `skill-library-provider` | Provider trait、permission model、pagination、error mapping |
+| `skill-library-provider-github` | GitHub REST/GraphQL、OAuth/device flow、tarball、diff |
+| `skill-library-installer` | 原生 Skill installer、target paths、copy/symlink、list/remove |
+| `skill-library-sync` | subscription、version resolution、lockfile、update policy、rollback |
+| `skill-library-publish` | local Skill package、hash、risk summary、publish request |
+| `skill-library-cli` | 复用 Rust core 的 headless CLI |
 
 ## 5. 本地数据目录
 
 ```text
-~/.team-ai-hub/
+~/.skill-library/
 ├── config.toml
-├── teamai.db
+├── skill-library.db
 ├── subscriptions.yaml
 ├── workspaces/
 │   └── github.com--acme--team-skills/
@@ -211,19 +211,19 @@ Crate 职责：
 
 ### 6.1 目标
 
-Rust 实现 Team AI Hub 需要的最小安装能力，不完整复刻 `skills` CLI。
+Rust 实现 Skill Library 需要的最小安装能力，不完整复刻 `skills` CLI。
 
 MVP 支持：
 
 - 安装本地目录。
-- 安装 Team AI Hub 已下载 / 解压的 Skill 目录。
+- 安装 Skill Library 已下载 / 解压的 Skill 目录。
 - 安装到 Claude Code / Cursor / Codex。
 - list / remove / update / rollback。
 - copy 模式默认；symlink 模式可选。
 - 保留可执行位。
 - 防 path traversal。
 - 原子安装：先写临时目录，成功后 rename/swap。
-- 写 Team AI Hub 自己的 lockfile。
+- 写 Skill Library 自己的 lockfile。
 
 ### 6.2 Target 路径
 
@@ -275,7 +275,7 @@ resolve source
 - 参考其 agent target、source parser、安装行为。
 - 不把 Node/Bun 打包进桌面端。
 - 不承诺支持 `skills` CLI 的全部 public source 语法。
-- 提供 debug fallback：开发期可设置 `TEAMAI_USE_SKILLS_CLI=1` 调用外部 `skills` CLI，比对行为。
+- 提供 debug fallback：开发期可设置 `SKILL_LIBRARY_USE_SKILLS_CLI=1` 调用外部 `skills` CLI，比对行为。
 
 如果未来 `skills` CLI 成为事实标准协议，可以增加导入/导出兼容层，但默认安装仍走 Rust native installer。
 
@@ -292,7 +292,7 @@ resolve source
 - 查询 tag / release / compare。
 - 查当前用户 repo permission。
 
-这样 CLI Only / 半离线模式仍然成立，资产内容不经 Team AI Hub 服务器。
+这样 CLI Only / 半离线模式仍然成立，资产内容不经 Skill Library 服务器。
 
 ### 7.2 云端控制面
 
@@ -441,7 +441,7 @@ Rust 内部使用 typed error，IPC 边界转成稳定 code。
 - `/` 重定向到 `/dashboard`。
 - workspace / skill detail 使用 loader 调 Tauri command 取数据。
 - search params 管理列表筛选、排序、tab，例如 `?q=&target=&risk=&tab=versions`。
-- deep link `teamai://subscribe?...` 进入桌面端后映射到对应 Skill 详情或订阅确认 modal。
+- deep link `skill-library://subscribe?...` 进入桌面端后映射到对应 Skill 详情或订阅确认 modal。
 - 每个一级路由有独立 error boundary，Provider 限流 / 授权失效要能局部恢复。
 
 ### 9.3 HeroUI 使用
@@ -519,7 +519,7 @@ Source-Hash: sha256:...
 Skill-Version: 1.2.0
 Targets: claude-code,cursor,codex
 Risk-Level: medium
-Submitted-By: Team AI Hub
+Submitted-By: Skill Library
 ```
 
 Auto-merge MVP 条件：
@@ -536,7 +536,7 @@ Auto-merge MVP 条件：
 注册就是 Provider 登录：
 
 - 用户已有 GitHub：Continue with GitHub。
-- 用户没有 GitHub：邀请页跳转 GitHub 注册，完成后回到 Team AI Hub。
+- 用户没有 GitHub：邀请页跳转 GitHub 注册，完成后回到 Skill Library。
 - 企业内网：自托管版本使用内网 Provider OAuth / PAT / SSO。
 
 邀请能力：
@@ -647,7 +647,7 @@ E2E：
 
 CLI：
 
-- `teamai` 由同一 Rust workspace 构建。
+- `skill-library` 由同一 Rust workspace 构建。
 - 桌面 app 可以暴露 "Install CLI"。
 - CLI 不依赖桌面 UI，可用于 CI / headless。
 
@@ -738,4 +738,4 @@ Cloud GitHub App Bot for PR / invite / webhook
 CLI reused from Rust core
 ```
 
-这条路线比 Node/Bun 内置更轻，比完整 Rust 重写 `skills` CLI 更可控，也更贴合 Team AI Hub 的核心价值：团队工作流、Provider 权限、发布 PR、邀请与本地安全安装。
+这条路线比 Node/Bun 内置更轻，比完整 Rust 重写 `skills` CLI 更可控，也更贴合 Skill Library 的核心价值：团队工作流、Provider 权限、发布 PR、邀请与本地安全安装。

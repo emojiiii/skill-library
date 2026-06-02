@@ -1,6 +1,6 @@
 import { Check, ChevronsUpDown, Plus, Search } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { StoredWorkspace } from "../lib/teamai";
+import type { StoredWorkspace } from "../lib/skill-library";
 import { useLocale } from "../hooks/useLocale";
 import { workspaceColor, workspaceInitials } from "../utils/workspace-visual";
 

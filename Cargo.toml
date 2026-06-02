@@ -1,14 +1,14 @@
 [workspace]
 members = [
   "apps/desktop/src-tauri",
-  "crates/teamai-cli",
-  "crates/teamai-core",
-  "crates/teamai-installer",
-  "crates/teamai-manifest",
-  "crates/teamai-provider",
-  "crates/teamai-provider-github",
-  "crates/teamai-publish",
-  "crates/teamai-sync",
+  "crates/skill-library-cli",
+  "crates/skill-library-core",
+  "crates/skill-library-installer",
+  "crates/skill-library-manifest",
+  "crates/skill-library-provider",
+  "crates/skill-library-provider-github",
+  "crates/skill-library-publish",
+  "crates/skill-library-sync",
 ]
 resolver = "2"
 

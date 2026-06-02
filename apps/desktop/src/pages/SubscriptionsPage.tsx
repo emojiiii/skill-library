@@ -1,5 +1,5 @@
 import { useLocale } from "../hooks/useLocale";
-import type { Subscription } from "../lib/teamai";
+import type { Subscription } from "../lib/skill-library";
 import { formatRelativeTime } from "../utils/format";
 import { Card } from "../widgets/Card";
 import { MetricTile } from "../widgets/MetricTile";
@@ -43,7 +43,7 @@ export function SubscriptionsPage({
           <Card.Header>
             <div>
               <Card.Title>{t("subscriptions.declarations")}</Card.Title>
-              <Card.Subtitle>~/.team-ai-hub/subscriptions.yaml</Card.Subtitle>
+              <Card.Subtitle>~/.skill-library/subscriptions.yaml</Card.Subtitle>
             </div>
             <Pill>{t("subscriptions.entries").replace("{count}", String(total))}</Pill>
           </Card.Header>

@@ -5,7 +5,7 @@ import {
   diffWorkspaceSince,
   isTauri,
   type SkillAsset,
-} from "../lib/teamai";
+} from "../lib/skill-library";
 import {
   loadWorkspaceCache,
   updateCacheHead,

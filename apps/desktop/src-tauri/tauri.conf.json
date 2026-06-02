@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Team AI Hub",
+  "productName": "Skill Library",
   "version": "0.1.0",
-  "identifier": "dev.teamaihub.desktop",
+  "identifier": "dev.skilllibrary.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "beforeBuildCommand": "pnpm build",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Team AI Hub",
+        "title": "Skill Library",
         "width": 1220,
         "height": 820,
         "minWidth": 980,
@@ -29,13 +29,20 @@
   "plugins": {
     "deep-link": {
       "desktop": {
-        "schemes": ["teamai"]
+        "schemes": ["skill-library"]
       }
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": []
+    "icon": [
+      "icons/icon.png",
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
   }
 }

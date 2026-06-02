@@ -9,7 +9,7 @@ import {
   type SkillAsset,
   type SkillVersion,
   compareSkillVersions,
-} from "../lib/teamai";
+} from "../lib/skill-library";
 import { Pill } from "./Pill";
 
 type VersionBump = "patch" | "minor" | "major";
@@ -488,6 +488,7 @@ export function PublishModal({
       <Modal.Backdrop>
         <Modal.Container size="lg">
           <Modal.Dialog className="flex h-[min(920px,calc(100vh-48px))] w-[min(1480px,calc(100vw-48px))] max-w-none flex-col rounded-[12px] bg-[var(--bg-elevated)] outline-none">
+            <Modal.CloseTrigger />
             <Modal.Header className="shrink-0 border-b border-[var(--line)] px-5 py-4">
               <Modal.Heading className="text-[15px] font-semibold tracking-tight flex items-center gap-2">
                 <Package size={16} />

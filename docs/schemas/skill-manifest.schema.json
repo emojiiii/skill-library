@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://teamaihub.dev/schemas/skill-manifest.schema.json",
-  "title": "Team AI Hub Skill Manifest",
-  "description": "Manifest schema for Team AI Hub Skill assets.",
+  "$id": "https://skilllibrary.dev/schemas/skill-manifest.schema.json",
+  "title": "Skill Library Skill Manifest",
+  "description": "Manifest schema for Skill Library Skill assets.",
   "type": "object",
   "additionalProperties": true,
   "required": ["id", "type", "name", "description", "version", "targets"],

@@ -1,6 +1,6 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { inviteGithubCollaborator, listWorkspaceMembers } from "../lib/teamai";
+import { inviteGithubCollaborator, listWorkspaceMembers } from "../lib/skill-library";
 import { InvitationsPage } from "../pages/InvitationsPage";
 import { useWorkspace } from "../context/WorkspaceContext";
 import { formatError } from "../utils/format";

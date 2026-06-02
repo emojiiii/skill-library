@@ -251,7 +251,10 @@ impl Database {
     pub fn finish_download(
         &self,
         id: &str,
+        name: &str,
+        description: &str,
         version: &str,
+        source_path: &str,
         source_branch: &str,
         local_path: &str,
         baseline_hash: &str,
@@ -259,8 +262,8 @@ impl Database {
         let now = chrono::Utc::now().to_rfc3339();
         let mtime = collect_mtime_fingerprint(Path::new(local_path));
         self.conn.execute(
-            "UPDATE skills SET version = ?1, source_branch = ?2, local_path = ?3, baseline_hash = ?4, published_hash = ?4, mtime_fingerprint = ?5, is_modified = 0, install_status = 'installed', download_progress = 100, download_error = '', updated_at = ?6 WHERE id = ?7",
-            params![version, source_branch, local_path, baseline_hash, &mtime, &now, id],
+            "UPDATE skills SET name = ?1, description = ?2, version = ?3, source_path = ?4, source_branch = ?5, local_path = ?6, baseline_hash = ?7, published_hash = ?7, mtime_fingerprint = ?8, is_modified = 0, install_status = 'installed', download_progress = 100, download_error = '', updated_at = ?9 WHERE id = ?10",
+            params![name, description, version, source_path, source_branch, local_path, baseline_hash, &mtime, &now, id],
         )?;
         Ok(())
     }
@@ -968,7 +971,9 @@ pub fn scan_unmanaged_skills(home: &Path, db: &Database) -> Vec<UnmanagedSkill> 
 }
 
 fn parse_skill_identity_from_skill_md(path: &Path) -> Option<(String, String)> {
-    let manifest = teamai_manifest::parse_skill_dir(path).ok()?.manifest?;
+    let manifest = skill_library_manifest::parse_skill_dir(path)
+        .ok()?
+        .manifest?;
     let name = manifest.name.trim().to_owned();
     if name.is_empty() {
         return None;

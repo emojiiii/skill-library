@@ -1,4 +1,4 @@
-import type { SemanticChange, SkillComparison } from "../lib/teamai";
+import type { SemanticChange, SkillComparison } from "../lib/skill-library";
 import { useLocale } from "../hooks/useLocale";
 import { riskTone } from "../utils/risk";
 import { Card } from "./Card";

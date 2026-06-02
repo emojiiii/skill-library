@@ -1,9 +1,9 @@
 import { create } from "zustand";
-import type { LocalAgentEntry } from "../lib/teamai";
-import type { PublishPreview } from "../lib/teamai";
+import type { LocalAgentEntry } from "../lib/skill-library";
+import type { PublishPreview } from "../lib/skill-library";
 import type { InviteRole } from "../utils/navigation";
 
-const SELECTED_WS_KEY = "teamai-selected-workspace";
+const SELECTED_WS_KEY = "skill-library-selected-workspace";
 
 function readStoredWorkspace(): string | null {
   try {

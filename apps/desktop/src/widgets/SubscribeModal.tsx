@@ -1,7 +1,7 @@
 import { Button, Modal, Switch } from "@heroui/react";
 import { useEffect, useState } from "react";
 import { useLocale } from "../hooks/useLocale";
-import type { SkillAsset } from "../lib/teamai";
+import type { SkillAsset } from "../lib/skill-library";
 import { Pill } from "../widgets/Pill";
 
 export type UpdatePolicy = "auto-patch" | "auto-minor" | "manual" | "pin";
@@ -61,6 +61,7 @@ export function SubscribeModal({
       <Modal.Backdrop>
         <Modal.Container size="md">
           <Modal.Dialog className="rounded-[12px] bg-[var(--bg-elevated)] outline-none">
+            <Modal.CloseTrigger />
             <Modal.Header className="border-b border-[var(--line)] px-5 py-4">
               <Modal.Heading className="text-[15px] font-semibold tracking-tight">
                 {t("subscribe.title")} {asset.manifest.name}

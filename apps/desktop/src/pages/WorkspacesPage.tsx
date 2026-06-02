@@ -3,8 +3,8 @@ import { GitBranch, Search, ShieldCheck } from "lucide-react";
 import { Modal } from "@heroui/react";
 import type { ReactNode } from "react";
 import { useLocale } from "../hooks/useLocale";
-import type { SkillAsset, SkillVersion, Workspace, WorkspaceDetail } from "../lib/teamai";
-import { listWorkspaceBranches } from "../lib/teamai";
+import type { SkillAsset, SkillVersion, Workspace, WorkspaceDetail } from "../lib/skill-library";
+import { listWorkspaceBranches } from "../lib/skill-library";
 import type { ReviewVerdictMap } from "../lib/review";
 import { Pill } from "../widgets/Pill";
 
@@ -183,6 +183,7 @@ export function WorkspacesPage({
               className="flex flex-col rounded-[14px] bg-[var(--bg-elevated)] outline-none"
               style={{ width: "min(1040px, 94vw)", maxWidth: "min(1040px, 94vw)", height: "min(760px, 88vh)" }}
             >
+              <Modal.CloseTrigger />
               {detailPanel}
             </Modal.Dialog>
           </Modal.Container>

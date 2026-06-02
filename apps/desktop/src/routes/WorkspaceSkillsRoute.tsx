@@ -23,7 +23,7 @@ import {
   type Workspace,
   type WorkspaceDetail,
   listWorkspaces,
-} from "../lib/teamai";
+} from "../lib/skill-library";
 import { normalizeRemoteReview, reviewVerdictMapKey, type ReviewVerdictMap } from "../lib/review";
 import { WorkspacesPage } from "../pages/WorkspacesPage";
 import { PublishModal } from "../widgets/PublishModal";

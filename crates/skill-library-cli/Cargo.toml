@@ -1,0 +1,28 @@
+[package]
+name = "skill-library-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "skill-library"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+skill-library-core = { path = "../skill-library-core" }
+skill-library-installer = { path = "../skill-library-installer" }
+skill-library-manifest = { path = "../skill-library-manifest" }
+skill-library-publish = { path = "../skill-library-publish" }
+skill-library-provider = { path = "../skill-library-provider" }
+skill-library-provider-github = { path = "../skill-library-provider-github" }
+skill-library-sync = { path = "../skill-library-sync" }
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

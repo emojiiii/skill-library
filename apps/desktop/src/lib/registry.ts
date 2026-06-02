@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { isTauri } from "./teamai";
+import { isTauri } from "./skill-library";
 
 /**
  * A skill entry from the public skills.sh registry.

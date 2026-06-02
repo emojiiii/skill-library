@@ -12,7 +12,7 @@ import {
   downloadSkillAsync,
   getSkillDetail,
   type SkillManifest,
-} from "../lib/teamai";
+} from "../lib/skill-library";
 import { useLocale } from "../hooks/useLocale";
 import { useAppStore } from "../state/appStore";
 import { getSkillDetailFromCache, putSkillDetailInCache } from "../lib/workspaceCache";
@@ -126,16 +126,16 @@ export function DiscoverRoute() {
   // Empty targets = download locally, deploy to no tools.
   const install = useMutation({
     mutationFn: async (selection: InstallTargetSelection) => {
-      if (!selected || !manifest) throw new Error("no skill selected");
+      if (!selected) throw new Error("no skill selected");
       // Prefer the backend-resolved in-repo path; fall back to the registry id.
       const skillPath = detail.data?.asset.path ?? selected.skillId;
       await downloadSkillAsync({
         workspace: selected.source,
-        assetId: manifest.id,
+        assetId: manifest?.id ?? selected.skillId,
         skillPath,
-        version: manifest.version,
-        name: manifest.name,
-        description: manifest.description,
+        version: manifest?.version,
+        name: manifest?.name ?? selected.name,
+        description: manifest?.description,
         targets: selection.targets,
         projectTargets: selection.projectTargets,
       });
@@ -182,7 +182,7 @@ export function DiscoverRoute() {
               <DiscoverSkillDetail
                 selected={selected}
                 detail={detail.data}
-                loading={detail.isLoading}
+                loading={detail.isLoading && !manifest}
                 error={detail.error}
                 installPending={install.isPending}
                 onInstallClick={() => setInstallOpen(true)}
@@ -210,6 +210,7 @@ export function DiscoverRoute() {
         manifest={manifest}
         loading={detail.isLoading}
         sourceLabel={selected?.source ?? ""}
+        fallbackName={selected?.name}
         defaultTargets={targets}
         pending={install.isPending}
         onConfirm={(selection) => {

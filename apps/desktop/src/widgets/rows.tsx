@@ -4,7 +4,7 @@ import type {
   PublishPolicyCheckRecord,
   PublishRequestRecord,
   WorkspaceMember,
-} from "../lib/teamai";
+} from "../lib/skill-library";
 import { useLocale } from "../hooks/useLocale";
 import { formatDateTime, formatRelativeTime, shortHash } from "../utils/format";
 import { riskTone, stateTone } from "../utils/risk";

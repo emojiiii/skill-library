@@ -1,3 +1,3 @@
 fn main() {
-    teamai_desktop_lib::run();
+    skill_library_desktop_lib::run();
 }

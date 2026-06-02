@@ -10,7 +10,7 @@ Runs the local CLI key-path smoke required by the MVP docs:
   init -> auth status -> scan local Skill -> subscribe -> sync -> status
 
 The smoke uses an isolated temporary HOME and explicit target roots so it does
-not touch the caller's real Team AI Hub, Claude Code, Cursor, or Codex state.
+not touch the caller's real Skill Library, Claude Code, Cursor, or Codex state.
 USAGE
 }
 
@@ -23,7 +23,7 @@ if [[ $# -ne 0 ]]; then
   exit 2
 fi
 
-root="$(mktemp -d /private/tmp/teamai-cli-smoke.XXXXXX)"
+root="$(mktemp -d /private/tmp/skill-library-cli-smoke.XXXXXX)"
 home="$root/home"
 workspace="$root/workspace"
 source="$workspace/code-reviewer"
@@ -51,26 +51,26 @@ tags: [review, security]
 Run focused review passes over a local diff.
 EOF
 
-run_teamai() {
-  HOME="$home" CARGO_HOME="$cargo_home" RUSTUP_HOME="$rustup_home" rtk cargo run -q -p teamai-cli -- "$@"
+run_skill_library() {
+  HOME="$home" CARGO_HOME="$cargo_home" RUSTUP_HOME="$rustup_home" rtk cargo run -q -p skill-library-cli -- "$@"
 }
 
-run_teamai init > "$root/00-init.log"
-run_teamai auth status > "$root/01-auth-status.log"
-run_teamai scan "$workspace" > "$root/02-scan.log"
-run_teamai subscribe acme/team-skills code-reviewer \
+run_skill_library init > "$root/00-init.log"
+run_skill_library auth status > "$root/01-auth-status.log"
+run_skill_library scan "$workspace" > "$root/02-scan.log"
+run_skill_library subscribe acme/team-skills code-reviewer \
   --version 1.2.0 \
   --update manual \
   --target claude-code \
   --target cursor \
   --target codex > "$root/03-subscribe.log"
-run_teamai sync \
+run_skill_library sync \
   --source "$source" \
   --target-root "claude-code=$targets/claude-code" \
   --target-root "cursor=$targets/cursor" \
   --target-root "codex=$targets/codex" \
   --yes > "$root/04-sync.log"
-run_teamai status \
+run_skill_library status \
   --target claude-code \
   --target cursor \
   --target codex \
@@ -84,7 +84,7 @@ for target in claude-code cursor codex; do
     echo "FAIL: $target install is missing SKILL.md at $install_dir" >&2
     exit 1
   fi
-  if [[ ! -s "$install_dir/.teamai-install.json" ]]; then
+  if [[ ! -s "$install_dir/.skill-library-install.json" ]]; then
     echo "FAIL: $target install is missing metadata at $install_dir" >&2
     exit 1
   fi
@@ -103,7 +103,7 @@ const status = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 for (const target of ["claude-code", "cursor", "codex"]) {
   const installed = status.installed?.[target] ?? [];
   const skill = installed.find((item) => item.id === "code-reviewer");
-  if (!skill || skill.version !== "1.2.0" || skill.managed_by !== "team-ai-hub") {
+  if (!skill || skill.version !== "1.2.0" || skill.managed_by !== "skill-library") {
     console.error(`FAIL: ${target} status is missing code-reviewer v1.2.0 metadata`);
     process.exit(1);
   }
@@ -120,12 +120,12 @@ if ! grep -q "github: not logged in" "$root/01-auth-status.log"; then
   exit 1
 fi
 
-cli_log="$(find "$home/.team-ai-hub/logs" -type f -name '*.log' -print | head -n 1)"
+cli_log="$(find "$home/.skill-library/logs" -type f -name '*.log' -print | head -n 1)"
 if [[ -z "$cli_log" || ! -s "$cli_log" ]]; then
-  echo "FAIL: CLI did not write a log file under isolated ~/.team-ai-hub/logs" >&2
+  echo "FAIL: CLI did not write a log file under isolated ~/.skill-library/logs" >&2
   exit 1
 fi
-if ! grep -q "teamai command started" "$cli_log"; then
+if ! grep -q "skill-library command started" "$cli_log"; then
   echo "FAIL: CLI log is missing command lifecycle entries" >&2
   exit 1
 fi

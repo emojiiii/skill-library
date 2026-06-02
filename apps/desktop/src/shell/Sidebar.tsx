@@ -14,8 +14,9 @@ import {
   UsersRound,
 } from "lucide-react";
 import { type ReactNode, useState } from "react";
+import appIconUrl from "../assets/app-icon.png";
 import { useLocale } from "../hooks/useLocale";
-import type { StoredWorkspace } from "../lib/teamai";
+import type { StoredWorkspace } from "../lib/skill-library";
 import { type AppPage, buildNavPath, navRoutes, routeToPage } from "../utils/navigation";
 import { WorkspacePicker } from "./WorkspacePicker";
 
@@ -98,9 +99,12 @@ export function Sidebar({
         )
       ) : (
         <div className="flex items-center gap-2.5 px-3 py-3.5">
-          <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-[#0f1115] text-white">
-            <Sparkles size={15} />
-          </span>
+          <img
+            src={appIconUrl}
+            alt=""
+            draggable={false}
+            className="size-8 shrink-0 rounded-lg"
+          />
           {!collapsed ? (
             <span className="text-[13.5px] font-semibold tracking-tight text-[var(--fg)]">
               {t("login.title")}

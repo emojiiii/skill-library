@@ -1,6 +1,6 @@
-# Team AI Hub 系统架构
+# Skill Library 系统架构
 
-> 本文档描述 Team AI Hub 的系统组成、关键流程、部署形态与安全边界，配合 `PRODUCT_DOCUMENT.md` 阅读。
+> 本文档描述 Skill Library 的系统组成、关键流程、部署形态与安全边界，配合 `PRODUCT_DOCUMENT.md` 阅读。
 > 设计目标：**最薄的体验层 + 最厚的 Provider 复用** —— 资产内容尽量不流经我们的服务器。
 
 ---
@@ -13,22 +13,22 @@
 flowchart LR
     subgraph User["用户侧"]
         IDE["IDE / Agent<br/>(15+ 支持)"]
-        Desktop["Team AI Hub Desktop<br/>(Tauri v2 + React + HeroUI)"]
-        CLI["teamai CLI<br/>(Rust core 复用)"]
+        Desktop["Skill Library Desktop<br/>(Tauri v2 + React + HeroUI)"]
+        CLI["skill-library CLI<br/>(Rust core 复用)"]
         Installer["Rust native installer<br/>(symlink / copy)"]
     end
 
     subgraph LocalData["本地数据层"]
         SQLite[("SQLite<br/>db.sqlite")]
-        SkillsDir["~/.team-ai-hub/skills/<br/>(canonical source)"]
+        SkillsDir["~/.skill-library/skills/<br/>(canonical source)"]
         RuntimeDir["各 IDE skills 目录<br/>(symlink → canonical)"]
     end
 
-    subgraph Cloud["Team AI Hub 服务（SaaS 或自托管）"]
+    subgraph Cloud["Skill Library 服务（SaaS 或自托管）"]
         WebUI["Web UI<br/>(React + HeroUI)"]
         API["API 服务<br/>(REST + Webhook)"]
         ProviderAdapter["Provider 适配层<br/>(GitHub / GitLab / Gitea ...)"]
-        Bot["Team AI Hub Bot<br/>(PR / Invite / Webhook)"]
+        Bot["Skill Library Bot<br/>(PR / Invite / Webhook)"]
         MetaDB[("元数据 DB<br/>(Postgres)")]
     end
 
@@ -63,8 +63,8 @@ flowchart LR
 ### 1.2 解读
 
 - **桌面端是主入口**：Tauri v2 + React + HeroUI，所有核心操作通过 Tauri commands 调用 Rust 后端。
-- **SQLite 是本地真相源**：skills 注册表、targets 启用状态、缓存数据全部存在 `~/.team-ai-hub/db.sqlite`。
-- **Symlink 架构**：canonical skill 文件存在 `~/.team-ai-hub/skills/`，各 IDE 目录通过 symlink 引用，更新只改一处。
+- **SQLite 是本地真相源**：skills 注册表、targets 启用状态、缓存数据全部存在 `~/.skill-library/db.sqlite`。
+- **Symlink 架构**：canonical skill 文件存在 `~/.skill-library/skills/`，各 IDE 目录通过 symlink 引用，更新只改一处。
 - **Provider 适配层可插拔**：第一版 GitHub（REST + GraphQL），后续可加 GitLab / Gitea。
 - **Bot 只执行已授权操作**：创建 PR、auto-merge、邀请成员前必须先校验发起人在 Provider 里的真实权限。
 
@@ -75,7 +75,7 @@ flowchart LR
 ### 2.1 目录结构
 
 ```
-~/.team-ai-hub/
+~/.skill-library/
 ├── db.sqlite                    ← SQLite 数据库（WAL 模式）
 ├── skills/                      ← canonical skill 文件（单一数据源）
 │   ├── code-reviewer/
@@ -101,7 +101,7 @@ CREATE TABLE skills (
     source_workspace TEXT DEFAULT '',     -- e.g. "emojiiii/awesome-skills"
     source_path TEXT DEFAULT '',          -- e.g. "skills/dota2-arcade/abilities-items"
     source_branch TEXT DEFAULT '',        -- 订阅的分支
-    local_path TEXT NOT NULL,             -- ~/.team-ai-hub/skills/{id}/
+    local_path TEXT NOT NULL,             -- ~/.skill-library/skills/{id}/
     link_mode TEXT DEFAULT 'symlink',     -- 'symlink' | 'copy'
     baseline_hash TEXT DEFAULT '',        -- 导入/发布时的内容 hash
     published_hash TEXT DEFAULT '',       -- 最后发布时的 hash
@@ -145,10 +145,10 @@ CREATE TABLE cache_entries (
 
 ```
 导入/安装时：
-  源文件 → COPY → ~/.team-ai-hub/skills/{id}/
+  源文件 → COPY → ~/.skill-library/skills/{id}/
 
 启用到 IDE 时：
-  ~/.team-ai-hub/skills/{id}/ → SYMLINK → ~/.claude/skills/{id}
+  ~/.skill-library/skills/{id}/ → SYMLINK → ~/.claude/skills/{id}
                                          → ~/.cursor/skills/{id}
                                          → ~/.gemini/skills/{id}
                                          → ...
@@ -235,7 +235,7 @@ App 获得焦点 / 定时检测
 ```
 远程 workspace 有新版本（通过 SHA 轮询检测到）
   │
-  ├─ 下载新版本文件到 ~/.team-ai-hub/skills/{id}/（覆盖）
+  ├─ 下载新版本文件到 ~/.skill-library/skills/{id}/（覆盖）
   ├─ mark_updated_from_remote() → 重置 hash + mtime
   └─ symlink 不变，所有 IDE 自动看到新内容
 ```
@@ -274,13 +274,13 @@ App 获得焦点 / 定时检测
 
 ```
 crates/
-├── teamai-core/           ← 路径解析、凭证管理、通用类型
-├── teamai-manifest/       ← SKILL.md / manifest.yaml 解析、风险评估
-├── teamai-installer/      ← install / remove / list 到各 runtime
-├── teamai-provider/       ← Provider trait 定义
-├── teamai-provider-github/ ← GitHub REST + GraphQL 实现
-├── teamai-publish/        ← 打包、policy 评估、PR 生成
-└── teamai-sync/           ← 订阅、workspace 管理、同步逻辑
+├── skill-library-core/           ← 路径解析、凭证管理、通用类型
+├── skill-library-manifest/       ← SKILL.md / manifest.yaml 解析、风险评估
+├── skill-library-installer/      ← install / remove / list 到各 runtime
+├── skill-library-provider/       ← Provider trait 定义
+├── skill-library-provider-github/ ← GitHub REST + GraphQL 实现
+├── skill-library-publish/        ← 打包、policy 评估、PR 生成
+└── skill-library-sync/           ← 订阅、workspace 管理、同步逻辑
 
 apps/desktop/src-tauri/
 ├── src/lib.rs             ← Tauri commands（50+ 命令）
@@ -355,10 +355,10 @@ apps/desktop/src-tauri/
 | 数据 | 存储位置 | 加密 |
 |---|---|---|
 | GitHub OAuth Token | OS Keychain | 系统级加密 |
-| Skill 文件内容 | `~/.team-ai-hub/skills/` | 无（本地文件） |
+| Skill 文件内容 | `~/.skill-library/skills/` | 无（本地文件） |
 | 用户设置 | localStorage | 无（非敏感） |
 | 缓存数据 | SQLite | 无（可重建） |
-| 日志 | `~/.team-ai-hub/logs/` | Token 自动脱敏 |
+| 日志 | `~/.skill-library/logs/` | Token 自动脱敏 |
 
 ### 8.2 权限模型
 

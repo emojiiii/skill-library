@@ -20,7 +20,7 @@ if [[ $# -ne 0 ]]; then
   exit 2
 fi
 
-root="$(mktemp -d /private/tmp/teamai-diagnostics-smoke.XXXXXX)"
+root="$(mktemp -d /private/tmp/skill-library-diagnostics-smoke.XXXXXX)"
 home="$root/home"
 out="$root/diagnostics"
 workspace="$root/workspace"
@@ -47,26 +47,26 @@ tags: [review]
 # Code Reviewer
 EOF
 
-run_teamai() {
-  HOME="$home" CARGO_HOME="$cargo_home" RUSTUP_HOME="$rustup_home" rtk cargo run -q -p teamai-cli -- "$@"
+run_skill_library() {
+  HOME="$home" CARGO_HOME="$cargo_home" RUSTUP_HOME="$rustup_home" rtk cargo run -q -p skill-library-cli -- "$@"
 }
 
-run_teamai init > "$root/00-init.log"
-run_teamai subscribe acme/team-skills code-reviewer \
+run_skill_library init > "$root/00-init.log"
+run_skill_library subscribe acme/team-skills code-reviewer \
   --version 1.2.0 \
   --update manual \
   --target claude-code \
   --target cursor \
   --target codex > "$root/01-subscribe.log"
-run_teamai sync \
+run_skill_library sync \
   --source "$source" \
   --target-root "claude-code=$targets/claude-code" \
   --target-root "cursor=$targets/cursor" \
   --target-root "codex=$targets/codex" \
   --yes > "$root/02-sync.log"
 
-echo 'token=ghp_abcdefghijklmnopqrstuvwxyz1234567890' >> "$home/.team-ai-hub/logs/test-token.log"
-run_teamai diagnostics --output "$out" > "$root/03-diagnostics.log"
+echo 'token=ghp_abcdefghijklmnopqrstuvwxyz1234567890' >> "$home/.skill-library/logs/test-token.log"
+run_skill_library diagnostics --output "$out" > "$root/03-diagnostics.log"
 
 for file in diagnostics.json summary.json subscriptions.json workspaces.json; do
   if [[ ! -s "$out/$file" ]]; then

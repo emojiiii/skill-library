@@ -2,7 +2,7 @@ import { Button, Modal, Spinner, Switch, toast } from "@heroui/react";
 import { FolderOpen, ShieldAlert } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useLocale } from "../hooks/useLocale";
-import { selectProjectDirectory, type ProjectInstallTarget, type SkillManifest } from "../lib/teamai";
+import { selectProjectDirectory, type ProjectInstallTarget, type SkillManifest } from "../lib/skill-library";
 import { plainPermissionLines, riskRequiresConfirmation, effectiveRisk } from "../utils/risk";
 import { SkillSafetyCard } from "./SkillSafetyCard";
 
@@ -37,6 +37,7 @@ export function InstallToToolsDialog({
   manifest,
   loading,
   sourceLabel,
+  fallbackName,
   defaultTargets,
   onConfirm,
   pending,
@@ -47,6 +48,7 @@ export function InstallToToolsDialog({
   /** Detail still loading — show a spinner instead of nothing (cold install). */
   loading?: boolean;
   sourceLabel: string;
+  fallbackName?: string;
   defaultTargets: string[];
   onConfirm: (selection: InstallTargetSelection) => void;
   pending: boolean;
@@ -71,7 +73,11 @@ export function InstallToToolsDialog({
   const setInstallScope = (next: InstallScope) => {
     const fallbackTargets = normalizeToolTargets(defaultTargets);
     setScope(next);
-    setSelected(next === "project" ? [selected.find((id) => TOOL_IDS.has(id)) ?? fallbackTargets[0] ?? "codex"] : fallbackTargets);
+    setSelected(
+      next === "project"
+        ? [selected.find((id) => TOOL_IDS.has(id)) ?? fallbackTargets[0] ?? "codex"]
+        : fallbackTargets,
+    );
   };
 
   const chooseProjectRoot = async () => {
@@ -87,12 +93,13 @@ export function InstallToToolsDialog({
   // the detail query resolved) — show a small loading dialog so the click has
   // immediate feedback instead of nothing.
   if (!manifest) {
-    if (open && loading) {
+    if (open && loading && !fallbackName) {
       return (
         <Modal isOpen={open} onOpenChange={onOpenChange}>
           <Modal.Backdrop>
             <Modal.Container size="md">
               <Modal.Dialog className="rounded-[12px] bg-[var(--bg-elevated)] outline-none">
+                <Modal.CloseTrigger />
                 <Modal.Body className="flex items-center justify-center gap-3 px-5 py-10 text-[13px] text-[var(--fg-muted)]">
                   <Spinner size="sm" />
                   {t("common.loading")}
@@ -103,11 +110,11 @@ export function InstallToToolsDialog({
         </Modal>
       );
     }
-    return null;
   }
 
-  const needsConfirm = riskRequiresConfirmation(effectiveRisk(manifest));
-  const caps = plainPermissionLines(manifest, t);
+  const displayName = manifest?.name ?? fallbackName ?? sourceLabel;
+  const needsConfirm = manifest ? riskRequiresConfirmation(effectiveRisk(manifest)) : false;
+  const caps = manifest ? plainPermissionLines(manifest, t) : [];
   // Selecting no tools is allowed — it just downloads the skill locally without
   // deploying anywhere, so the machine-modification risk gate doesn't apply.
   // The gate only matters once a tool is selected (i.e. files land in an agent
@@ -128,9 +135,10 @@ export function InstallToToolsDialog({
       <Modal.Backdrop>
         <Modal.Container size="md">
           <Modal.Dialog className="rounded-[12px] bg-[var(--bg-elevated)] outline-none">
+            <Modal.CloseTrigger />
             <Modal.Header className="border-b border-[var(--line)] px-5 py-4">
               <Modal.Heading className="text-[15px] font-semibold tracking-tight">
-                {t("install.toTools.title").replace("{name}", manifest.name)}
+                {t("install.toTools.title").replace("{name}", displayName)}
               </Modal.Heading>
               <div className="mt-1 text-[12px] text-[var(--fg-muted)]">{sourceLabel}</div>
             </Modal.Header>
@@ -209,37 +217,37 @@ export function InstallToToolsDialog({
                     })}
                   </div>
                 ) : (
-                <div className="space-y-1.5">
-                  {TOOLS.map((tool) => {
-                    const enabled = selected.includes(tool.id);
-                    return (
-                      <label
-                        key={tool.id}
-                        className="flex cursor-pointer items-center justify-between rounded-md border border-[var(--line)] bg-[var(--bg-elevated)] px-3 py-2.5 hover:bg-[var(--bg-soft)]"
-                      >
-                        <span className="text-[13px] font-medium">{tool.label}</span>
-                        <Switch
-                          isSelected={enabled}
-                          onChange={(value) =>
-                            setSelected((prev) =>
-                              value
-                                ? Array.from(new Set([...prev, tool.id]))
-                                : prev.filter((id) => id !== tool.id),
-                            )
-                          }
+                  <div className="space-y-1.5">
+                    {TOOLS.map((tool) => {
+                      const enabled = selected.includes(tool.id);
+                      return (
+                        <label
+                          key={tool.id}
+                          className="flex cursor-pointer items-center justify-between rounded-md border border-[var(--line)] bg-[var(--bg-elevated)] px-3 py-2.5 hover:bg-[var(--bg-soft)]"
                         >
-                          <Switch.Control>
-                            <Switch.Thumb />
-                          </Switch.Control>
-                        </Switch>
-                      </label>
-                    );
-                  })}
-                </div>
+                          <span className="text-[13px] font-medium">{tool.label}</span>
+                          <Switch
+                            isSelected={enabled}
+                            onChange={(value) =>
+                              setSelected((prev) =>
+                                value
+                                  ? Array.from(new Set([...prev, tool.id]))
+                                  : prev.filter((id) => id !== tool.id),
+                              )
+                            }
+                          >
+                            <Switch.Control>
+                              <Switch.Thumb />
+                            </Switch.Control>
+                          </Switch>
+                        </label>
+                      );
+                    })}
+                  </div>
                 )}
               </section>
 
-              <SkillSafetyCard manifest={manifest} />
+              {manifest ? <SkillSafetyCard manifest={manifest} /> : null}
 
               {needsConfirm && !downloadOnly ? (
                 <label className="flex cursor-pointer items-start gap-2.5 rounded-md border border-[var(--warning)] bg-[var(--warning-soft)] px-3 py-2.5">

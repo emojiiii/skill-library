@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { readSubscriptions } from "../lib/teamai";
+import { readSubscriptions } from "../lib/skill-library";
 import { SubscriptionsPage } from "../pages/SubscriptionsPage";
 
 export function SubscriptionsRoute() {

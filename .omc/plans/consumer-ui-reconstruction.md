@@ -1,4 +1,4 @@
-# Team AI Hub — 面向普通用户的完整 UI 重构
+# Skill Library — 面向普通用户的完整 UI 重构
 
 ## 目标
 把当前"开发者形态"的界面重构为**双层架构**,让纯非技术用户开箱即用,同时保留创作者/管理员的完整能力。
@@ -9,7 +9,7 @@
 核心原则:版本控制与权限对普通人**隐形**(自动更新+一键还原,不暴露 commit/branch);登录从"进门的墙"变成"碰到社交/贡献功能时的即时软提示"。
 
 ## 已验证的关键事实(决定可行性)
-1. **后端天然支持匿名读取**:`teamai-provider-github` 的 token 是 `Option<String>`,仅在非空时加 `Authorization` 头;`scan_github_workspace / get_workspace_detail / get_skill_detail / read_skill_file` 全部 `token.or_else(saved_github_token)`,无 token 时降级匿名。→ **消费层不需要改 Rust 读取逻辑**。
+1. **后端天然支持匿名读取**:`skill-library-provider-github` 的 token 是 `Option<String>`,仅在非空时加 `Authorization` 头;`scan_github_workspace / get_workspace_detail / get_skill_detail / read_skill_file` 全部 `token.or_else(saved_github_token)`,无 token 时降级匿名。→ **消费层不需要改 Rust 读取逻辑**。
 2. **强制 token 的命令恰好都是创作者动作**:`list_github_workspaces`(列我的仓库)、`invite`、`publish` → 自然归入创作者层。
 3. **skills.sh 提供可用注册表 API**:`GET https://skills.sh/api/search?q=<keyword>` 返回 JSON,每条含 `source`(GitHub `owner/repo`)、`skillId`、`name`、`installs`。这个 `source` 正好喂给现有匿名读取路径。
 4. **该 API 无 CORS 头** → webview 直接 fetch 会被拦截,**必须新增一个 Rust 代理命令**(服务端请求,无 CORS 问题,与现有架构一致)。

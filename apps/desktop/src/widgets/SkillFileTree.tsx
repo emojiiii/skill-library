@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight, File, FileText, Folder } from "lucide-react";
 import { useMemo } from "react";
-import { listSkillFiles, type SkillFileEntry } from "../lib/teamai";
+import { listSkillFiles, type SkillFileEntry } from "../lib/skill-library";
 import { getFileTreeFromCache, putFileTreeInCache } from "../lib/workspaceCache";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { useLocale } from "../hooks/useLocale";

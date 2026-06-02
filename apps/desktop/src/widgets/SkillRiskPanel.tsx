@@ -11,7 +11,7 @@ import {
   type AiReviewFinding,
   type AiReviewResult,
   type SkillManifest,
-} from "../lib/teamai";
+} from "../lib/skill-library";
 import { getReviewCache, putReviewCache, type ReviewCacheEntry } from "../lib/workspaceCache";
 import {
   formatRelativeTime,

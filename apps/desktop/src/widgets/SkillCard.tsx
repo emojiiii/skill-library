@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronRight, Package } from "lucide-react";
-import type { SkillAsset } from "../lib/teamai";
+import type { SkillAsset } from "../lib/skill-library";
 
 export function SkillCard({
   asset,

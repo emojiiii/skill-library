@@ -32,7 +32,7 @@
 
 ## 阶段 1 — 性能（最高价值，先做）
 
-### 1a. 后端：消除冗余往返（`crates/teamai-provider-github/src/scan.rs`）
+### 1a. 后端：消除冗余往返（`crates/skill-library-provider-github/src/scan.rs`）
 - `read_skill_detail` 走「按 id 解析」分支时，`resolve_skill_dir` 已经扫描并解析出 `SkillAsset`（含 manifest）。**直接复用**这个 asset，不再二次 `read_skill_asset`。
 - 解析成功后，把 readme / skill_markdown / versions 三个独立请求用 `futures::join!` **并行化**（依赖已存在 `futures`）。
 - 字面路径优先逻辑保留（工作区浏览场景仍是 1 次命中）。
@@ -43,7 +43,7 @@
 - 发现页详情 `retry` 从 1 调成 0（404 不该重试），失败立即反馈。
 - `staleTime` 提到 5-10 分钟（已部分如此）。
 
-**验证**：`cargo test -p teamai-provider-github`、`pnpm check`，并手动点发现页技能确认变快。
+**验证**：`cargo test -p skill-library-provider-github`、`pnpm check`，并手动点发现页技能确认变快。
 
 ---
 
@@ -103,5 +103,5 @@
 
 ## 待你确认后我立即开始的第一步
 阶段 1a + 1b（性能），改动文件：
-- `crates/teamai-provider-github/src/scan.rs`（复用 asset + 并行请求）
+- `crates/skill-library-provider-github/src/scan.rs`（复用 asset + 并行请求）
 - `apps/desktop/src/routes/DiscoverRoute.tsx`、`WorkspaceSkillsRoute.tsx`（缓存 + retry）

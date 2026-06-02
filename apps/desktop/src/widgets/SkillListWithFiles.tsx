@@ -1,6 +1,6 @@
 import { ChevronDown, ChevronRight, Folder } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { SkillAsset } from "../lib/teamai";
+import type { SkillAsset } from "../lib/skill-library";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { useLocale } from "../hooks/useLocale";
 import { SkillCard } from "./SkillCard";

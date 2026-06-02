@@ -1,7 +1,7 @@
 import { Button, Modal } from "@heroui/react";
 import { Check, ChevronsUpDown, GitPullRequestArrow, ShieldAlert } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import type { LocalAgentEntry, PublishPreview, StoredWorkspace } from "../lib/teamai";
+import type { LocalAgentEntry, PublishPreview, StoredWorkspace } from "../lib/skill-library";
 import { Pill, type PillTone } from "../widgets/Pill";
 import { workspaceColor, workspaceInitials } from "../utils/workspace-visual";
 import { useLocale } from "../hooks/useLocale";
@@ -87,6 +87,7 @@ export function PushModal({
       <Modal.Backdrop>
         <Modal.Container size="md">
           <Modal.Dialog className="rounded-[12px] bg-[var(--bg-elevated)] outline-none">
+            <Modal.CloseTrigger />
             <Modal.Header className="border-b border-[var(--line)] px-5 py-4">
               <Modal.Heading className="text-[15px] font-semibold tracking-tight">
                 {t("push.title").replace("{name}", entry.name)}

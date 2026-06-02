@@ -1,5 +1,5 @@
 import { GitCommit, Tag } from "lucide-react";
-import type { SkillAsset, SkillVersion } from "../lib/teamai";
+import type { SkillAsset, SkillVersion } from "../lib/skill-library";
 import { useLocale } from "../hooks/useLocale";
 import { formatRelativeTime } from "../utils/format";
 import { Card } from "./Card";

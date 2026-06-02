@@ -1,7 +1,7 @@
 import { Button } from "@heroui/react";
 import { useQuery } from "@tanstack/react-query";
 import { ExternalLink, GitCommit, RefreshCw } from "lucide-react";
-import { listSkillCommits, type SkillCommit } from "../lib/teamai";
+import { listSkillCommits, type SkillCommit } from "../lib/skill-library";
 import { useLocale } from "../hooks/useLocale";
 import { formatRelativeTime, openExternalUrl } from "../utils/format";
 

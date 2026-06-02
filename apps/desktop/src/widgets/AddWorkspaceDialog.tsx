@@ -1,7 +1,7 @@
 import { Button, Input, Modal, Spinner } from "@heroui/react";
 import { Plus, Search } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { Workspace } from "../lib/teamai";
+import type { Workspace } from "../lib/skill-library";
 import { workspaceColor, workspaceInitials } from "../utils/workspace-visual";
 import { Pill } from "../widgets/Pill";
 import { useLocale } from "../hooks/useLocale";
@@ -55,6 +55,7 @@ export function AddWorkspaceDialog({
       <Modal.Backdrop>
         <Modal.Container size="md">
           <Modal.Dialog className="rounded-[12px] bg-[var(--bg-elevated)] outline-none">
+            <Modal.CloseTrigger />
             <Modal.Header className="border-b border-[var(--line)] px-5 py-4">
               <Modal.Heading className="text-[15px] font-semibold tracking-tight">{t("workspace.add.title")}</Modal.Heading>
               <div className="mt-1 text-[12px] text-[var(--fg-muted)]">

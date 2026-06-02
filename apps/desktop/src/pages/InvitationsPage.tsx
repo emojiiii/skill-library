@@ -8,8 +8,8 @@ import type {
   InvitationRecord,
   RepositoryInvitation,
   WorkspaceMember,
-} from "../lib/teamai";
-import { acceptRepositoryInvitation, inviteGithubCollaborator, listRepositoryInvitations } from "../lib/teamai";
+} from "../lib/skill-library";
+import { acceptRepositoryInvitation, inviteGithubCollaborator, listRepositoryInvitations } from "../lib/skill-library";
 import { type InviteRole, inviteRoleLabel, inviteRoles } from "../utils/navigation";
 import { formatRelativeTime, openExternalUrl } from "../utils/format";
 import { Card } from "../widgets/Card";

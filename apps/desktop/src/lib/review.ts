@@ -1,4 +1,4 @@
-import type { AiReviewFinding } from "./teamai";
+import type { AiReviewFinding } from "./skill-library";
 import type { ReviewCacheEntry } from "./workspaceCache";
 
 export { formatRelativeTime } from "../utils/format";

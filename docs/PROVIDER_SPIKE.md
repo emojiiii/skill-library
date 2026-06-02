@@ -16,7 +16,7 @@
 ## 2. Provider 接口定义
 
 ```typescript
-// Provider 是 Team AI Hub 与具体 Git 托管平台之间的唯一抽象边界。
+// Provider 是 Skill Library 与具体 Git 托管平台之间的唯一抽象边界。
 // 所有方法都是 async；调用方不应假设任何 Provider 特定字段存在。
 
 export interface Provider {
@@ -171,7 +171,7 @@ MVP 需要验证的 GitHub App 权限组合：
 | 邀请 repo collaborator | Administration: write |
 | 邀请 org member / 加 team | Members: write（organization permission） |
 
-若用户未安装 GitHub App 或未授予对应权限，Team AI Hub 只展示引导，不尝试用用户 OAuth token 绕过。
+若用户未安装 GitHub App 或未授予对应权限，Skill Library 只展示引导，不尝试用用户 OAuth token 绕过。
 
 ### 4.4 Web OAuth Code Flow
 
@@ -179,7 +179,7 @@ MVP 需要验证的 GitHub App 权限组合：
 sequenceDiagram
     autonumber
     participant U as 用户浏览器
-    participant W as Team AI Hub Web
+    participant W as Skill Library Web
     participant GH as GitHub OAuth
     U->>W: 点击 "用 GitHub 登录"
     W->>W: 生成 state + PKCE（可选）, 存 session
@@ -200,7 +200,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     autonumber
-    participant CLI as teamai CLI
+    participant CLI as skill-library CLI
     participant GH as GitHub
     participant U as 用户浏览器
     CLI->>GH: POST /login/device/code (client_id, scope)
@@ -211,14 +211,14 @@ sequenceDiagram
         CLI->>GH: POST /login/oauth/access_token (device_code, grant_type=device_code)
         GH-->>CLI: pending / slow_down / { access_token }
     end
-    CLI->>CLI: 写入系统 keychain（service=teamai, account=github:<login>）
+    CLI->>CLI: 写入系统 keychain（service=skill-library, account=github:<login>）
 ```
 
 ### 4.6 Token 存储
 
 - **Web**：Postgres 表 `provider_tokens(user_id, provider, encrypted_token, scopes, created_at)`，列加密用 KMS 派生的 DEK（envelope encryption）。session cookie 仅放 user_id，不放 token。
 - **Bot**：GitHub App private key / installation token 单独存储，installation token 短期缓存，按 org/repo 维度隔离。
-- **CLI**：系统 keychain（macOS Keychain / Windows Credential Manager / libsecret）。无 keychain 时回退到 `~/.team-ai-hub/credentials.json`，文件权限 0600，并提示用户。
+- **CLI**：系统 keychain（macOS Keychain / Windows Credential Manager / libsecret）。无 keychain 时回退到 `~/.skill-library/credentials.json`，文件权限 0600，并提示用户。
 - **绝不写日志**：token、code、device_code 都加入 logger redact 列表。
 
 ### 4.7 刷新与撤销
@@ -346,7 +346,7 @@ on 403 / 429:
 
 - **最小 scope**：用户登录 token 只申请 `repo` + `read:org` + `read:user`；写操作由 GitHub App installation token 执行。
 - **Bot 不提升权限**：publish PR、auto-merge、invitation 前必须先用用户身份查 Provider 权限；权限不足直接拒绝。
-- **邀请最终落 Provider**：Team AI Hub 可保存 invitation 状态缓存，但成员关系以 GitHub / GitLab / Gitea 为准。
+- **邀请最终落 Provider**：Skill Library 可保存 invitation 状态缓存，但成员关系以 GitHub / GitLab / Gitea 为准。
 - **登出即撤销**：用户主动登出或撤销设备，调用 `DELETE /applications/{client_id}/token`，**不**只删本地记录。
 - **私有 repo 内容不缓存到我方持久存储**：Postgres / 对象存储里只放 manifest 元数据（name、version、permissions、targets）和 ETag，正文一律按需现拉。
 - **每 repo 独立 webhook secret**：泄漏一个不影响其他 repo；secret 不出现在日志、错误响应、客户端。

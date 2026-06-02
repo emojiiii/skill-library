@@ -219,7 +219,7 @@ fn platform_icon(bundle_path: &Path, size: IconSize) -> Option<CachedIcon> {
 #[cfg(target_os = "macos")]
 fn macos_icon(bundle_path: &Path, size: IconSize) -> Option<CachedIcon> {
     let cache_dir = std::env::temp_dir()
-        .join("team-ai-hub-app-icons")
+        .join("skill-library-app-icons")
         .join(format!("v{ICON_CACHE_VERSION}"))
         .join(format!("{}@{ICON_RASTER_SCALE}x", size.as_str()));
     fs::create_dir_all(&cache_dir).ok()?;

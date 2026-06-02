@@ -1,4 +1,4 @@
-import type { Workspace } from "../lib/teamai";
+import type { Workspace } from "../lib/skill-library";
 
 const palette = [
   ["#eef2ff", "#312e81"],

@@ -15,7 +15,7 @@ import {
   type DiscussionComment,
   type DiscussionInfo,
   type ReactionGroup,
-} from "../lib/teamai";
+} from "../lib/skill-library";
 import {
   getDiscussionsEnabledCache,
   setDiscussionsEnabledCache,

@@ -35,7 +35,7 @@ hasUnpublishedChanges = editedContent !== null && editedContent.trim() !== sourc
 ### B1. 设置层（SettingsDialog + AppSettings）
 - `AppSettings` 加字段：`aiProvider: "openai" | "anthropic" | "none"`、`aiBaseUrl: string`、`aiModel: string`。**API key 不进 AppSettings/localStorage**（敏感）。
 - 新增设置分区 "AI 审查"（Sparkles 图标）：provider 下拉、BaseURL 输入、model 输入、API key 输入（password）+ 保存/清除按钮、"测试连接"按钮。
-- API key 走 **Rust keyring**（复用 teamai-core 的 keyring 机制，新增一个 service/username 条目），不明文存盘。新增命令 `save_ai_credential` / `load_ai_credential(只返回是否已设置)` / `delete_ai_credential`。
+- API key 走 **Rust keyring**（复用 skill-library-core 的 keyring 机制，新增一个 service/username 条目），不明文存盘。新增命令 `save_ai_credential` / `load_ai_credential(只返回是否已设置)` / `delete_ai_credential`。
 
 ### B2. 后端 provider 抽象（Rust）
 - 新建 `ai_review` 模块（在 desktop src-tauri 内）。
@@ -55,13 +55,13 @@ hasUnpublishedChanges = editedContent !== null && editedContent.trim() !== sourc
 - 现在 SkillRiskPanel 只收 `manifest` + `skillPath`。需让 SkillDetail 把 `skillMarkdown`（已有 `detail?.skill_markdown?.content`）传进来。
 
 ### 影响文件
-- 前端：`shell/SettingsDialog.tsx`（AI 分区）、`widgets/SkillRiskPanel.tsx`（审查 UI）、`widgets/SkillDetail.tsx`（传 markdown）、`lib/teamai.ts`（新命令封装）、`hooks/useLocale.ts`（文案）
+- 前端：`shell/SettingsDialog.tsx`（AI 分区）、`widgets/SkillRiskPanel.tsx`（审查 UI）、`widgets/SkillDetail.tsx`（传 markdown）、`lib/skill-library.ts`（新命令封装）、`hooks/useLocale.ts`（文案）
 - 后端：`src-tauri/src/lib.rs`（review_skill + ai credential 命令 + 注册）、可能新增 `src-tauri/src/ai_review.rs`
-- 可能：`teamai-core`（如果 keyring 条目复用需要小改）
+- 可能：`skill-library-core`（如果 keyring 条目复用需要小改）
 
 ### 待你确认的点（实施前）—— 已确认
 1. provider 协议：**OpenAI + Anthropic** 两种（先不做 Gemini）。OpenAI 协议最通用，第三方网关/中转/本地模型多兼容它。
-2. API key 存储：**OS keyring**（复用 teamai-core 的 keyring，与 GitHub token 同机制，不落明文）。
+2. API key 存储：**OS keyring**（复用 skill-library-core 的 keyring，与 GitHub token 同机制，不落明文）。
 3. 审查触发：**手动点按钮**（省 token、可控）。
 
 ---

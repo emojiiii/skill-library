@@ -1,5 +1,5 @@
 import { createContext, useContext } from "react";
-import type { StoredWorkspace } from "../lib/teamai";
+import type { StoredWorkspace } from "../lib/skill-library";
 
 export interface WorkspaceContextValue {
   /** e.g. "owner/repo" */

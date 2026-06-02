@@ -9,7 +9,7 @@ import {
   type StoredWorkspace,
   previewPublishFromWorkspace,
   publishSkillToWorkspace,
-} from "../lib/teamai";
+} from "../lib/skill-library";
 import { openExternalUrl } from "../utils/format";
 import { workspaceColor, workspaceInitials } from "../utils/workspace-visual";
 import { Pill, type PillTone } from "./Pill";
@@ -113,6 +113,7 @@ export function SyncSkillModal({
       <Modal.Backdrop>
         <Modal.Container size="md">
           <Modal.Dialog className="rounded-[12px] bg-[var(--bg-elevated)] outline-none">
+            <Modal.CloseTrigger />
             <Modal.Header className="border-b border-[var(--line)] px-5 py-4">
               <Modal.Heading className="text-[15px] font-semibold tracking-tight">
                 {t("sync.title")} &mdash; &ldquo;{skillId}&rdquo;

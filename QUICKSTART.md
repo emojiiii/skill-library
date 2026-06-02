@@ -1,4 +1,4 @@
-# Team AI Hub Quickstart
+# Skill Library Quickstart
 
 This guide runs the current MVP locally: Hono API, Tauri/Vite desktop UI, Rust CLI, routed management pages, and the demo Skill workspace.
 
@@ -25,12 +25,12 @@ This guide runs the current MVP locally: Hono API, Tauri/Vite desktop UI, Rust C
 3. Copy `.env.example` into your shell or process manager. For local API state with Postgres:
 
    ```bash
-   export DATABASE_URL=postgres://teamai:teamai@localhost:54329/teamai
+   export DATABASE_URL=postgres://skill-library:skill-library@localhost:54329/skill-library
    export GITHUB_WEBHOOK_SECRET=local-dev-secret
-   export TEAMAI_WEBHOOK_CALLBACK_URL=https://example.com/api/webhooks/github
+   export SKILL_LIBRARY_WEBHOOK_CALLBACK_URL=https://example.com/api/webhooks/github
    ```
 
-   Without `DATABASE_URL`, the API falls back to `.teamai-api-state.json`. Set `TEAMAI_API_STATE_PATH` to choose a different JSON file for demos.
+   Without `DATABASE_URL`, the API falls back to `.skill-library-api-state.json`. Set `SKILL_LIBRARY_API_STATE_PATH` to choose a different JSON file for demos.
 
 4. Run the API:
 
@@ -57,33 +57,33 @@ This guide runs the current MVP locally: Hono API, Tauri/Vite desktop UI, Rust C
 Build the Rust CLI:
 
 ```bash
-rtk cargo build -p teamai-cli
+rtk cargo build -p skill-library-cli
 ```
 
 Run it from the workspace:
 
 ```bash
-rtk cargo run -p teamai-cli -- --help
+rtk cargo run -p skill-library-cli -- --help
 ```
 
 Install the binary into Cargo's bin directory:
 
 ```bash
-rtk cargo install --path crates/teamai-cli
+rtk cargo install --path crates/skill-library-cli
 ```
 
 Initialize local state and authenticate:
 
 ```bash
-rtk teamai init
-rtk teamai login github --client-id "$GITHUB_CLIENT_ID"
-rtk teamai auth status
+rtk skill-library init
+rtk skill-library login github --client-id "$GITHUB_CLIENT_ID"
+rtk skill-library auth status
 ```
 
 PAT fallback:
 
 ```bash
-rtk teamai login github --token "$GITHUB_TOKEN"
+rtk skill-library login github --token "$GITHUB_TOKEN"
 ```
 
 ## Demo Workspace
@@ -106,7 +106,7 @@ You can generate that repository locally:
 rtk pnpm demo:create-repo
 ```
 
-Then push `./team-ai-hub-demo-skills` to GitHub as `owner/team-ai-hub-demo-skills`.
+Then push `./skill-library-demo-skills` to GitHub as `owner/skill-library-demo-skills`.
 
 Each `SKILL.md` should include frontmatter like:
 
@@ -140,15 +140,15 @@ rtk git push origin v1.0.0 v1.1.0 v1.2.0
 Keep `v1.2.1` for the update step. The fixture helper can push it during the final demo:
 
 ```bash
-export TEAMAI_DEMO_REPO_DIR=./team-ai-hub-demo-skills
-rtk pnpm demo:push-update "$TEAMAI_DEMO_REPO_DIR"
+export SKILL_LIBRARY_DEMO_REPO_DIR=./skill-library-demo-skills
+rtk pnpm demo:push-update "$SKILL_LIBRARY_DEMO_REPO_DIR"
 ```
 
 Then add and scan it:
 
 ```bash
-rtk teamai workspace add owner/team-ai-hub-demo-skills
-rtk teamai scan-remote owner/team-ai-hub-demo-skills
+rtk skill-library workspace add owner/skill-library-demo-skills
+rtk skill-library scan-remote owner/skill-library-demo-skills
 ```
 
 ## Routed Page Smoke Coverage
@@ -195,19 +195,19 @@ Run the local CLI key-path smoke:
 rtk pnpm smoke:cli-keypath
 ```
 
-This creates an isolated temporary HOME, scans a local Skill, subscribes to it, sync-installs it into explicit Claude Code, Cursor, and Codex target roots, and verifies `teamai status` plus installed metadata. The final real-provider demo still covers GitHub login, workspace add, publish PR, invitation, notification, update, and rollback against a real repository.
+This creates an isolated temporary HOME, scans a local Skill, subscribes to it, sync-installs it into explicit Claude Code, Cursor, and Codex target roots, and verifies `skill-library status` plus installed metadata. The final real-provider demo still covers GitHub login, workspace add, publish PR, invitation, notification, update, and rollback against a real repository.
 
-CLI lifecycle logs are written to `~/.team-ai-hub/logs/YYYY-MM-DD.log`. Add `--verbose` to any `teamai` command to mirror the same logs to stderr without changing stdout output.
+CLI lifecycle logs are written to `~/.skill-library/logs/YYYY-MM-DD.log`. Add `--verbose` to any `skill-library` command to mirror the same logs to stderr without changing stdout output.
 
 Export a sanitized diagnostics bundle:
 
 ```bash
-rtk teamai diagnostics
+rtk skill-library diagnostics
 ```
 
 The bundle includes local config, subscriptions, workspace lock summaries, and redacted log copies. It intentionally excludes `credentials.json` and OS keychain secrets. Run `rtk pnpm smoke:diagnostics` to verify this behavior in an isolated temporary HOME.
 
-The desktop `/cli` page exposes the same diagnostics export plus a Logs button that opens `~/.team-ai-hub/logs` in the native Tauri shell.
+The desktop `/cli` page exposes the same diagnostics export plus a Logs button that opens `~/.skill-library/logs` in the native Tauri shell.
 
 Run the local rollback smoke:
 
@@ -227,21 +227,21 @@ Print the real-provider command plan:
 rtk pnpm demo:real-provider:dry-run
 ```
 
-Execute and record CLI/API logs after setting `TEAMAI_DEMO_WORKSPACE` and `GITHUB_TOKEN`:
+Execute and record CLI/API logs after setting `SKILL_LIBRARY_DEMO_WORKSPACE` and `GITHUB_TOKEN`:
 
 ```bash
-export TEAMAI_DEMO_WORKSPACE=owner/team-ai-hub-demo-skills
-export TEAMAI_DEMO_REPO_DIR=./team-ai-hub-demo-skills
+export SKILL_LIBRARY_DEMO_WORKSPACE=owner/skill-library-demo-skills
+export SKILL_LIBRARY_DEMO_REPO_DIR=./skill-library-demo-skills
 export GITHUB_TOKEN=...
 rtk pnpm demo:real-provider
 ```
 
-Logs are written under `.teamai-demo-evidence/<timestamp>/`. Use `docs/DEMO_RUNBOOK.md` for the manual screenshot checklist that completes the evidence set.
+Logs are written under `.skill-library-demo-evidence/<timestamp>/`. Use `docs/DEMO_RUNBOOK.md` for the manual screenshot checklist that completes the evidence set.
 
 After adding the required screenshots, verify the folder:
 
 ```bash
-rtk pnpm demo:verify-evidence .teamai-demo-evidence/<timestamp>
+rtk pnpm demo:verify-evidence .skill-library-demo-evidence/<timestamp>
 ```
 
 ## Publish PR Flow
@@ -249,14 +249,14 @@ rtk pnpm demo:verify-evidence .teamai-demo-evidence/<timestamp>
 Preview a local Skill package:
 
 ```bash
-rtk teamai package ~/.claude/skills/local-helper --workspace owner/team-ai-hub-demo-skills
+rtk skill-library package ~/.claude/skills/local-helper --workspace owner/skill-library-demo-skills
 ```
 
 Create a publish PR:
 
 ```bash
-rtk teamai package ~/.claude/skills/local-helper \
-  --workspace owner/team-ai-hub-demo-skills \
+rtk skill-library package ~/.claude/skills/local-helper \
+  --workspace owner/skill-library-demo-skills \
   --publish-pr \
   --token "$GITHUB_TOKEN" \
   --api http://localhost:8787
@@ -265,8 +265,8 @@ rtk teamai package ~/.claude/skills/local-helper \
 Low-risk publish packages can request auto-merge:
 
 ```bash
-rtk teamai package ~/.claude/skills/local-helper \
-  --workspace owner/team-ai-hub-demo-skills \
+rtk skill-library package ~/.claude/skills/local-helper \
+  --workspace owner/skill-library-demo-skills \
   --publish-pr \
   --auto-merge \
   --token "$GITHUB_TOKEN" \
@@ -281,7 +281,7 @@ The API records publish requests and policy checks. The desktop `/publish` page 
 Invite a collaborator:
 
 ```bash
-rtk teamai invite owner/team-ai-hub-demo-skills octocat \
+rtk skill-library invite owner/skill-library-demo-skills octocat \
   --role read \
   --token "$GITHUB_TOKEN" \
   --api http://localhost:8787
@@ -294,32 +294,32 @@ Use the desktop `/invitations` page to view pending invitations, run onboarding 
 Subscribe and sync:
 
 ```bash
-rtk teamai subscribe owner/team-ai-hub-demo-skills code-reviewer \
+rtk skill-library subscribe owner/skill-library-demo-skills code-reviewer \
   --target claude-code \
   --target cursor \
   --target codex \
   --update auto-patch
-rtk teamai sync --token "$GITHUB_TOKEN" --pull-notifications --api http://localhost:8787
+rtk skill-library sync --token "$GITHUB_TOKEN" --pull-notifications --api http://localhost:8787
 ```
 
 Run one daemon poll for local verification, or omit `--once` to keep polling:
 
 ```bash
-rtk teamai daemon --once --interval-seconds 60 --api http://localhost:8787
+rtk skill-library daemon --once --interval-seconds 60 --api http://localhost:8787
 ```
 
 Inspect install state:
 
 ```bash
-rtk teamai status --target claude-code --target cursor --target codex
-rtk teamai versions owner/team-ai-hub-demo-skills --skill code-reviewer --token "$GITHUB_TOKEN"
-rtk teamai diff owner/team-ai-hub-demo-skills v1.0.0 v1.2.0 --skill-path code-reviewer --token "$GITHUB_TOKEN"
+rtk skill-library status --target claude-code --target cursor --target codex
+rtk skill-library versions owner/skill-library-demo-skills --skill code-reviewer --token "$GITHUB_TOKEN"
+rtk skill-library diff owner/skill-library-demo-skills v1.0.0 v1.2.0 --skill-path code-reviewer --token "$GITHUB_TOKEN"
 ```
 
 Rollback:
 
 ```bash
-rtk teamai rollback owner/team-ai-hub-demo-skills code-reviewer v1.1.0 \
+rtk skill-library rollback owner/skill-library-demo-skills code-reviewer v1.1.0 \
   --target claude-code \
   --target cursor \
   --target codex \
@@ -359,7 +359,7 @@ Minimum environment:
 GITHUB_CLIENT_ID=
 GITHUB_CLIENT_SECRET=
 GITHUB_WEBHOOK_SECRET=
-TEAMAI_WEBHOOK_CALLBACK_URL=https://your-host.example/api/webhooks/github
+SKILL_LIBRARY_WEBHOOK_CALLBACK_URL=https://your-host.example/api/webhooks/github
 ```
 
-For production, replace the Postgres password, serve the web/API endpoints behind HTTPS, and set `TEAMAI_WEBHOOK_CALLBACK_URL` to the public webhook endpoint registered with GitHub. For local API-only development, `rtk docker compose up -d postgres` plus `rtk pnpm dev:api` still works.
+For production, replace the Postgres password, serve the web/API endpoints behind HTTPS, and set `SKILL_LIBRARY_WEBHOOK_CALLBACK_URL` to the public webhook endpoint registered with GitHub. For local API-only development, `rtk docker compose up -d postgres` plus `rtk pnpm dev:api` still works.

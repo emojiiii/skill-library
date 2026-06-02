@@ -134,6 +134,7 @@ export function DiscoverPage({
               className="flex flex-col overflow-hidden rounded-[16px] bg-[var(--bg-elevated)] shadow-2xl outline-none"
               style={{ width: "min(980px, 92vw)", maxWidth: "min(980px, 92vw)", height: "min(720px, 84vh)" }}
             >
+              <Modal.CloseTrigger />
               {detailPanel}
             </Modal.Dialog>
           </Modal.Container>

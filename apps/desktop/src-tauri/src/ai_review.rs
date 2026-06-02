@@ -7,7 +7,7 @@
 //! The whole skill is reviewed, not just SKILL.md: every text file is inlined,
 //! PDFs are attached as documents (the LLM reads them natively), and any other
 //! binary is listed by name so the model knows what's bundled. The download +
-//! local cache is handled by the caller (teamai_sync::prepare_skill_for_review);
+//! local cache is handled by the caller (skill_library_sync::prepare_skill_for_review);
 //! this module just walks the on-disk directory.
 //!
 //! External LLM calls go through the Rust backend (the webview has no CORS for
@@ -408,7 +408,7 @@ pub async fn review_skill(
     let pdf_parts = parts.len().saturating_sub(text_parts);
 
     tracing::info!(
-        target: "teamai-ai",
+        target: "skill-library-ai",
         provider = %req.provider,
         base_url = %req.base_url,
         model = %req.model,
@@ -450,7 +450,7 @@ pub async fn review_skill(
 
     let raw = chat_res.first_text().map(str::to_owned).ok_or_else(|| {
         tracing::warn!(
-            target: "teamai-ai",
+            target: "skill-library-ai",
             reasoning_present = chat_res.reasoning_content.is_some(),
             "provider returned no text content"
         );
@@ -463,13 +463,13 @@ pub async fn review_skill(
     });
     match &result {
         Ok(r) => tracing::info!(
-            target: "teamai-ai",
+            target: "skill-library-ai",
             verdict = %r.verdict,
             findings = r.findings.len(),
             "ai review ok"
         ),
         Err(e) => tracing::warn!(
-            target: "teamai-ai",
+            target: "skill-library-ai",
             error = %e,
             raw = %raw.chars().take(300).collect::<String>(),
             "ai review parse failed"
@@ -486,7 +486,7 @@ fn map_genai_error(err: genai::Error) -> ReviewError {
     match err {
         G::HttpError { status, body, .. } => {
             tracing::warn!(
-                target: "teamai-ai",
+                target: "skill-library-ai",
                 status = status.as_u16(),
                 body = %body.chars().take(300).collect::<String>(),
                 "provider http error"
@@ -497,7 +497,7 @@ fn map_genai_error(err: genai::Error) -> ReviewError {
             }
         }
         other => {
-            tracing::warn!(target: "teamai-ai", error = %other, "provider call failed");
+            tracing::warn!(target: "skill-library-ai", error = %other, "provider call failed");
             ReviewError::Network(other.to_string())
         }
     }
@@ -566,7 +566,7 @@ mod tests {
 
     fn temp_skill_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "teamai-review-test-{}-{}",
+            "skill-library-review-test-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

@@ -1,4 +1,4 @@
-import type { SkillManifest } from "../lib/teamai";
+import type { SkillManifest } from "../lib/skill-library";
 
 export const riskOrder = ["low", "medium", "high", "critical"] as const;
 export type RiskRank = (typeof riskOrder)[number];

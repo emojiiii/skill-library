@@ -4355,6 +4355,182 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
+name = "skill-library-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "skill-library-core",
+ "skill-library-installer",
+ "skill-library-manifest",
+ "skill-library-provider",
+ "skill-library-provider-github",
+ "skill-library-publish",
+ "skill-library-sync",
+ "tokio",
+ "toml 0.8.23",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "skill-library-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dirs 5.0.1",
+ "keyring",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "toml 0.8.23",
+ "url",
+]
+
+[[package]]
+name = "skill-library-desktop"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "dirs 5.0.1",
+ "dotenvy",
+ "genai",
+ "reqwest 0.12.28",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "skill-library-core",
+ "skill-library-installer",
+ "skill-library-manifest",
+ "skill-library-provider",
+ "skill-library-provider-github",
+ "skill-library-publish",
+ "skill-library-sync",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-deep-link",
+ "tauri-plugin-dialog",
+ "tauri-plugin-opener",
+ "tauri-plugin-single-instance",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
+name = "skill-library-installer"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dirs 5.0.1",
+ "globset",
+ "serde",
+ "serde_json",
+ "skill-library-core",
+ "skill-library-manifest",
+ "tempfile",
+ "thiserror 1.0.69",
+ "walkdir",
+]
+
+[[package]]
+name = "skill-library-manifest"
+version = "0.1.0"
+dependencies = [
+ "semver",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "skill-library-core",
+ "tempfile",
+ "thiserror 1.0.69",
+ "walkdir",
+]
+
+[[package]]
+name = "skill-library-provider"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "serde",
+ "serde_json",
+ "skill-library-core",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "skill-library-provider-github"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "flate2",
+ "futures",
+ "hex",
+ "mockito",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "skill-library-core",
+ "skill-library-manifest",
+ "skill-library-provider",
+ "tar",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "skill-library-publish"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "skill-library-core",
+ "skill-library-manifest",
+ "tempfile",
+ "thiserror 1.0.69",
+ "walkdir",
+]
+
+[[package]]
+name = "skill-library-sync"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "semver",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "skill-library-core",
+ "skill-library-installer",
+ "skill-library-manifest",
+ "skill-library-provider",
+ "skill-library-provider-github",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4981,182 +5157,6 @@ dependencies = [
  "dunce",
  "embed-resource",
  "toml 1.1.2+spec-1.1.0",
-]
-
-[[package]]
-name = "teamai-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "teamai-core",
- "teamai-installer",
- "teamai-manifest",
- "teamai-provider",
- "teamai-provider-github",
- "teamai-publish",
- "teamai-sync",
- "tokio",
- "toml 0.8.23",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "teamai-core"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "dirs 5.0.1",
- "keyring",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "toml 0.8.23",
- "url",
-]
-
-[[package]]
-name = "teamai-desktop"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "chrono",
- "dirs 5.0.1",
- "dotenvy",
- "genai",
- "reqwest 0.12.28",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tauri",
- "tauri-build",
- "tauri-plugin-deep-link",
- "tauri-plugin-dialog",
- "tauri-plugin-opener",
- "tauri-plugin-single-instance",
- "teamai-core",
- "teamai-installer",
- "teamai-manifest",
- "teamai-provider",
- "teamai-provider-github",
- "teamai-publish",
- "teamai-sync",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "url",
-]
-
-[[package]]
-name = "teamai-installer"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "dirs 5.0.1",
- "globset",
- "serde",
- "serde_json",
- "teamai-core",
- "teamai-manifest",
- "tempfile",
- "thiserror 1.0.69",
- "walkdir",
-]
-
-[[package]]
-name = "teamai-manifest"
-version = "0.1.0"
-dependencies = [
- "semver",
- "serde",
- "serde_json",
- "serde_yaml",
- "teamai-core",
- "tempfile",
- "thiserror 1.0.69",
- "walkdir",
-]
-
-[[package]]
-name = "teamai-provider"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "serde",
- "serde_json",
- "teamai-core",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "teamai-provider-github"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "chrono",
- "flate2",
- "futures",
- "hex",
- "mockito",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2",
- "tar",
- "teamai-core",
- "teamai-manifest",
- "teamai-provider",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "teamai-publish"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "hex",
- "serde",
- "serde_json",
- "sha2",
- "teamai-core",
- "teamai-manifest",
- "tempfile",
- "thiserror 1.0.69",
- "walkdir",
-]
-
-[[package]]
-name = "teamai-sync"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "semver",
- "serde",
- "serde_json",
- "serde_yaml",
- "teamai-core",
- "teamai-installer",
- "teamai-manifest",
- "teamai-provider",
- "teamai-provider-github",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
 ]
 
 [[package]]

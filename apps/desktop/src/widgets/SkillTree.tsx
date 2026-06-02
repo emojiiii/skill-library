@@ -1,6 +1,6 @@
 import { ChevronDown, ChevronRight, Folder } from "lucide-react";
 import { useState } from "react";
-import type { SkillAsset } from "../lib/teamai";
+import type { SkillAsset } from "../lib/skill-library";
 import { SkillCard } from "./SkillCard";
 
 interface TreeNode {

@@ -1,5 +1,5 @@
 import { AlertTriangle, ShieldAlert, ShieldCheck } from "lucide-react";
-import type { SkillManifest } from "../lib/teamai";
+import type { SkillManifest } from "../lib/skill-library";
 import { useLocale } from "../hooks/useLocale";
 import { plainPermissionLines, safetyLevel, type SafetyLevel } from "../utils/risk";
 

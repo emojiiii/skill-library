@@ -22,6 +22,7 @@ use skill_library_sync::{
     SyncReport, TargetSelection, WorkspaceWebhookRegistration, WorkspacesFile,
 };
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -1200,7 +1201,7 @@ fn db_list_skills(app: tauri::AppHandle) -> CommandResult<Vec<ManagedSkill>> {
                 .map(|t| ManagedSkillTarget {
                     runtime: t.runtime.clone(),
                     enabled: t.enabled,
-                    target_path: t.target_path.clone(),
+                    target_path: path_str_for_frontend(&t.target_path),
                 })
                 .collect();
             let project_deployments: Vec<ManagedSkillProjectDeployment> = all_project_deployments
@@ -1209,8 +1210,8 @@ fn db_list_skills(app: tauri::AppHandle) -> CommandResult<Vec<ManagedSkill>> {
                 .map(|deployment| ManagedSkillProjectDeployment {
                     id: deployment.id,
                     runtime: deployment.runtime.clone(),
-                    project_root: deployment.project_root.clone(),
-                    target_path: deployment.target_path.clone(),
+                    project_root: path_str_for_frontend(&deployment.project_root),
+                    target_path: path_str_for_frontend(&deployment.target_path),
                     enabled: deployment.enabled,
                     status: deployment.status.clone(),
                     installed_hash: deployment.installed_hash.clone(),
@@ -1352,6 +1353,28 @@ fn project_target_path(
     Ok(root.join(skill_id))
 }
 
+fn path_string_for_frontend(path: &Path) -> String {
+    path_str_for_frontend(&path.to_string_lossy())
+}
+
+fn path_str_for_frontend(value: &str) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{rest}");
+        }
+        if let Some(rest) = value.strip_prefix(r"\\?\") {
+            return rest.to_owned();
+        }
+    }
+
+    value.to_owned()
+}
+
+fn path_from_frontend(value: &str) -> PathBuf {
+    PathBuf::from(path_str_for_frontend(value.trim()))
+}
+
 fn link_project_deployments(
     db_guard: &db::Database,
     skill_id: &str,
@@ -1369,8 +1392,8 @@ fn link_project_deployments(
             .upsert_project_deployment(
                 skill_id,
                 &target.runtime,
-                &project_root.to_string_lossy(),
-                &target_path.to_string_lossy(),
+                &path_string_for_frontend(&project_root),
+                &path_string_for_frontend(&target_path),
                 installed_hash,
             )
             .map_err(|e| CommandError::coded("db_error", e.to_string()))?;
@@ -1702,7 +1725,7 @@ fn db_import_skill(
             .map(|t| ManagedSkillTarget {
                 runtime: t.runtime,
                 enabled: t.enabled,
-                target_path: t.target_path,
+                target_path: path_str_for_frontend(&t.target_path),
             })
             .collect(),
         project_deployments: project_deployments
@@ -1711,8 +1734,8 @@ fn db_import_skill(
             .map(|deployment| ManagedSkillProjectDeployment {
                 id: deployment.id,
                 runtime: deployment.runtime,
-                project_root: deployment.project_root,
-                target_path: deployment.target_path,
+                project_root: path_str_for_frontend(&deployment.project_root),
+                target_path: path_str_for_frontend(&deployment.target_path),
                 enabled: deployment.enabled,
                 status: deployment.status,
                 installed_hash: deployment.installed_hash,
@@ -2114,7 +2137,7 @@ fn open_local_path(
     path: String,
     opener: Option<String>,
 ) -> CommandResult<()> {
-    let path = PathBuf::from(path.trim());
+    let path = path_from_frontend(&path);
     if !path.exists() {
         return Err(CommandError::coded(
             "path_not_found",
@@ -2245,6 +2268,13 @@ fn spawn_path_command<const N: usize>(
 }
 
 fn find_candidate_cli(candidate: &app_icons::PathOpenerCandidate) -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(path) = app_icons::find_candidate_app_exe(candidate) {
+            return Some(path);
+        }
+    }
+
     if let Some(app_name) = candidate.app_name {
         if let Some(bundle_path) = app_icons::find_app_bundle(app_name) {
             for relative_path in candidate.bundle_cli_paths {
@@ -2266,26 +2296,47 @@ fn find_candidate_cli(candidate: &app_icons::PathOpenerCandidate) -> Option<Path
 
 fn find_executable_in_path(name: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
-    for root in std::env::split_paths(&path_var) {
-        let path = root.join(name);
-        if path.exists() {
-            return Some(path);
-        }
+    find_executable_in_path_var(name, &path_var)
+}
 
+fn find_executable_in_path_var(name: &str, path_var: &OsStr) -> Option<PathBuf> {
+    for root in std::env::split_paths(path_var) {
         #[cfg(target_os = "windows")]
         {
-            for suffix in [".exe", ".cmd"] {
+            for suffix in app_icons::windows_launchable_suffixes() {
                 if name.ends_with(suffix) {
                     continue;
                 }
                 let path = root.join(format!("{name}{suffix}"));
-                if path.exists() {
+                if path.is_file() {
                     return Some(path);
                 }
+            }
+            let path = root.join(name);
+            if path.is_file() && windows_path_has_launchable_extension(&path) {
+                return Some(path);
+            }
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let path = root.join(name);
+            if path.exists() {
+                return Some(path);
             }
         }
     }
     None
+}
+
+#[cfg(target_os = "windows")]
+fn windows_path_has_launchable_extension(path: &Path) -> bool {
+    let Some(ext) = path.extension().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    app_icons::windows_launchable_suffixes()
+        .iter()
+        .any(|suffix| suffix.trim_start_matches('.').eq_ignore_ascii_case(ext))
 }
 
 /// Get cache size breakdown by workspace (from SQLite).
@@ -6108,23 +6159,55 @@ mod tests {
         let urls = opener
             .icon_urls
             .expect("path opener should include icon urls");
+        #[cfg(target_os = "windows")]
+        let expected_base = "http://appicon.localhost";
+        #[cfg(not(target_os = "windows"))]
+        let expected_base = "appicon://localhost";
+        let expected_default = format!("{expected_base}/vscode?size=default&scale=2&v=5");
 
         assert_eq!(opener.id, "vscode");
-        assert_eq!(
-            opener.icon_url.as_deref(),
-            Some("appicon://localhost/vscode?size=default&scale=2&v=2")
-        );
+        assert_eq!(opener.icon_url.as_deref(), Some(expected_default.as_str()));
         assert_eq!(
             urls.small,
-            "appicon://localhost/vscode?size=small&scale=2&v=2"
+            format!("{expected_base}/vscode?size=small&scale=2&v=5")
         );
         assert_eq!(
             urls.default_size,
-            "appicon://localhost/vscode?size=default&scale=2&v=2"
+            format!("{expected_base}/vscode?size=default&scale=2&v=5")
         );
         assert_eq!(
             urls.large,
-            "appicon://localhost/vscode?size=large&scale=2&v=2"
+            format!("{expected_base}/vscode?size=large&scale=2&v=5")
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_path_lookup_prefers_cmd_shim_over_extensionless_script() {
+        let dir = tempfile::tempdir().unwrap();
+        let extensionless = dir.path().join("code");
+        let cmd = dir.path().join("code.cmd");
+        std::fs::write(&extensionless, "#!/usr/bin/env sh\n").unwrap();
+        std::fs::write(&cmd, "@echo off\r\n").unwrap();
+
+        let path_var = std::env::join_paths([dir.path()]).unwrap();
+        let found = super::find_executable_in_path_var("code", &path_var);
+
+        assert_eq!(found.as_deref(), Some(cmd.as_path()));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_frontend_paths_strip_verbatim_prefixes() {
+        assert_eq!(
+            super::path_str_for_frontend(r"\\?\E:\project\.agents\skills\web-design-guidelines"),
+            r"E:\project\.agents\skills\web-design-guidelines"
+        );
+        assert_eq!(
+            super::path_str_for_frontend(
+                r"\\?\UNC\server\share\.agents\skills\web-design-guidelines"
+            ),
+            r"\\server\share\.agents\skills\web-design-guidelines"
         );
     }
 }

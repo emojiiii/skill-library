@@ -788,7 +788,13 @@ function OpenerIcon({
   variant?: "small" | "default" | "large";
 }) {
   const iconUrl = opener.iconUrls?.[variant] ?? opener.iconUrl;
-  if (iconUrl) {
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setFailed(false);
+  }, [iconUrl]);
+
+  if (iconUrl && !failed) {
     return (
       <img
         src={iconUrl}
@@ -796,10 +802,11 @@ function OpenerIcon({
         draggable={false}
         className="shrink-0 rounded-[4px]"
         style={{ width: size, height: size }}
+        onError={() => setFailed(true)}
       />
     );
   }
-  return null;
+  return <FolderOpen size={Math.max(13, Math.round(size * 0.82))} className="shrink-0 text-[var(--fg-muted)]" />;
 }
 
 function PathOpenButton({ path, openers }: { path: string; openers: PathOpener[] }) {

@@ -4387,7 +4387,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "toml 0.8.23",
  "url",
 ]
@@ -4419,7 +4419,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-appender",
@@ -4439,7 +4439,7 @@ dependencies = [
  "skill-library-core",
  "skill-library-manifest",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "walkdir",
 ]
 
@@ -4453,7 +4453,7 @@ dependencies = [
  "serde_yaml",
  "skill-library-core",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "walkdir",
 ]
 
@@ -4466,7 +4466,7 @@ dependencies = [
  "serde",
  "serde_json",
  "skill-library-core",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -4490,7 +4490,7 @@ dependencies = [
  "skill-library-provider",
  "tar",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
@@ -4507,7 +4507,7 @@ dependencies = [
  "skill-library-core",
  "skill-library-manifest",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "walkdir",
 ]
 
@@ -4526,7 +4526,7 @@ dependencies = [
  "skill-library-provider",
  "skill-library-provider-github",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tokio",
 ]
 

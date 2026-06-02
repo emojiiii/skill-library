@@ -194,7 +194,13 @@ jobs:
 
           function replaceVersion(path) {
             const text = fs.readFileSync(path, "utf8");
-            JSON.parse(text);
+            const parsed = JSON.parse(text);
+            if (typeof parsed.version !== "string") {
+              throw new Error(`Missing version in ${path}`);
+            }
+            if (parsed.version === version) {
+              return;
+            }
             const updated = text.replace(/("version"\s*:\s*")[^"]+(")/, `$1${version}$2`);
             if (updated === text) {
               throw new Error(`Could not replace version in ${path}`);
@@ -207,6 +213,13 @@ jobs:
 
           const cargoPath = "Cargo.toml";
           const cargoText = fs.readFileSync(cargoPath, "utf8");
+          const cargoVersion = cargoText.match(/\[workspace\.package\][\s\S]*?^version\s*=\s*"([^"]+)"/m)?.[1];
+          if (!cargoVersion) {
+            throw new Error("Missing workspace.package version in Cargo.toml");
+          }
+          if (cargoVersion === version) {
+            process.exit(0);
+          }
           const cargoUpdated = cargoText.replace(/(\[workspace\.package\][\s\S]*?^version\s*=\s*")[^"]+(")/m, `$1${version}$2`);
           if (cargoUpdated === cargoText) {
             throw new Error("Could not replace workspace.package version in Cargo.toml");

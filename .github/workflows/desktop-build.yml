@@ -31,10 +31,10 @@ jobs:
       isRelease: ${{ steps.version.outputs.isRelease }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22
 
@@ -112,16 +112,16 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 9.15.4
           run_install: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: pnpm
@@ -147,7 +147,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${CLIENT_ID:-}" ]; then
-            echo "::error::Set the CLIENT_ID repository variable before publishing release builds."
+            echo "::error::Set CLIENT_ID in repository Settings > Secrets and variables > Actions > Variables before publishing release builds. Environment variables are only available to jobs that declare an environment."
             exit 1
           fi
 
@@ -182,7 +182,7 @@ jobs:
           Compress-Archive -Path $exe -DestinationPath "portable/Skill-Library-v${{ needs.metadata.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}-portable.zip" -Force
 
       - name: Upload portable workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: skill-library-v${{ needs.metadata.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}-portable
           path: portable/*.zip
@@ -208,7 +208,7 @@ jobs:
           fi
 
       - name: Download workflow artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: skill-library-v${{ needs.metadata.outputs.version }}-*
           path: release-artifacts
@@ -248,7 +248,7 @@ jobs:
     if: ${{ always() && needs.build-desktop.result == 'success' && github.event_name != 'pull_request' && (needs.publish-release.result == 'success' || needs.publish-release.result == 'skipped') }}
     steps:
       - name: Keep last three release versions and artifact runs
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const keepReleases = 3;

@@ -47,9 +47,18 @@ impl GitLabProvider {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_else(|_| status.to_string());
+            let body = snippet(&body);
+            tracing::warn!(
+                target: "skill-library-gitlab",
+                method = "GET",
+                path,
+                status = status.as_u16(),
+                body = %body,
+                "non-success response"
+            );
             return Err(provider_error_from_status(
                 status,
-                format!("GET {path} ({status}): {}", snippet(&body)),
+                format!("GET {path} ({status}): {body}"),
             ));
         }
 

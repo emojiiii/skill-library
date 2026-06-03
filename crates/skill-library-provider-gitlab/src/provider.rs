@@ -4,7 +4,7 @@ use skill_library_core::{ProviderInstance, ProviderKind, WorkspaceRef};
 use skill_library_provider::{Page, ProviderError, Result, SkillSourceProvider, SourceRef};
 
 use crate::http::map_response;
-use crate::util::url_encode;
+use crate::util::{snippet, url_encode};
 
 const PRIVATE_TOKEN: HeaderName = HeaderName::from_static("private-token");
 
@@ -12,6 +12,16 @@ pub struct GitLabProvider {
     pub(crate) client: reqwest::Client,
     pub(crate) api_base: String,
     pub(crate) instance_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct GitLabTokenInfo {
+    pub login: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CurrentUserResponse {
+    username: String,
 }
 
 impl GitLabProvider {
@@ -60,6 +70,13 @@ impl GitLabProvider {
             client,
             api_base: api_base.into().trim_end_matches('/').to_owned(),
             instance_id: instance_id.into(),
+        })
+    }
+
+    pub async fn validate_token(&self) -> Result<GitLabTokenInfo> {
+        let user: CurrentUserResponse = self.get_json("/user").await?;
+        Ok(GitLabTokenInfo {
+            login: user.username,
         })
     }
 
@@ -117,9 +134,18 @@ impl GitLabProvider {
         let headers = response.headers().clone();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_else(|_| status.to_string());
+            let body = snippet(&body);
+            tracing::warn!(
+                target: "skill-library-gitlab",
+                method = "GET",
+                path,
+                status = status.as_u16(),
+                body = %body,
+                "non-success response"
+            );
             return Err(crate::http::provider_error_from_status(
                 status,
-                format!("GET {path} ({status}): {}", crate::util::snippet(&body)),
+                format!("GET {path} ({status}): {body}"),
             ));
         }
         let bytes = response

@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 
 use crate::http::provider_error_from_status;
 use crate::provider::GiteeProvider;
-use crate::util::{content_length, snippet, url_encode, validate_archive_path};
+use crate::util::{
+    content_length, redact_access_token, snippet, url_encode, validate_archive_path,
+};
 
 #[derive(Debug, Clone)]
 pub struct GiteeArchiveDownload {
@@ -34,8 +36,9 @@ impl GiteeProvider {
             "/repos/{owner}/{repo}/tarball?ref={}",
             url_encode(ref_name)
         ));
+        let safe_path = redact_access_token(&path);
         let url = format!("{}{}", self.api_base, path);
-        tracing::debug!(target: "skill-library-gitee", method = "GET", path = %path);
+        tracing::debug!(target: "skill-library-gitee", method = "GET", path = %safe_path);
         let response =
             self.client
                 .get(url)
@@ -47,9 +50,18 @@ impl GiteeProvider {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_else(|_| status.to_string());
+            let body = snippet(&body);
+            tracing::warn!(
+                target: "skill-library-gitee",
+                method = "GET",
+                path = %safe_path,
+                status = status.as_u16(),
+                body = %body,
+                "non-success response"
+            );
             return Err(provider_error_from_status(
                 status,
-                format!("GET {path} ({status}): {}", snippet(&body)),
+                format!("GET {safe_path} ({status}): {body}"),
             ));
         }
 

@@ -4,7 +4,7 @@ use skill_library_core::{ProviderInstance, ProviderKind, WorkspaceRef};
 use skill_library_provider::{Page, ProviderError, Result, SkillSourceProvider, SourceRef};
 
 use crate::http::map_response;
-use crate::util::url_encode;
+use crate::util::{redact_access_token, snippet, url_encode};
 
 pub struct GiteeProvider {
     pub(crate) client: reqwest::Client,
@@ -63,8 +63,9 @@ impl GiteeProvider {
 
     pub(crate) async fn get_json<T: for<'de> Deserialize<'de>>(&self, path: &str) -> Result<T> {
         let path = self.auth_path(path);
+        let safe_path = redact_access_token(&path);
         let url = format!("{}{}", self.api_base, path);
-        tracing::debug!(target: "skill-library-gitee", method = "GET", path = %path);
+        tracing::debug!(target: "skill-library-gitee", method = "GET", path = %safe_path);
         let response =
             self.client
                 .get(url)
@@ -73,7 +74,7 @@ impl GiteeProvider {
                 .map_err(|err| ProviderError::NetworkError {
                     cause: err.to_string(),
                 })?;
-        map_response(&path, "GET", response).await
+        map_response(&safe_path, "GET", response).await
     }
 
     pub(crate) async fn get_page_json<T: for<'de> Deserialize<'de>>(
@@ -81,8 +82,9 @@ impl GiteeProvider {
         path: &str,
     ) -> Result<Page<T>> {
         let path = self.auth_path(path);
+        let safe_path = redact_access_token(&path);
         let url = format!("{}{}", self.api_base, path);
-        tracing::debug!(target: "skill-library-gitee", method = "GET", path = %path);
+        tracing::debug!(target: "skill-library-gitee", method = "GET", path = %safe_path);
         let response =
             self.client
                 .get(url)
@@ -98,14 +100,15 @@ impl GiteeProvider {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_owned);
-        let items = map_response(&path, "GET", response).await?;
+        let items = map_response(&safe_path, "GET", response).await?;
         Ok(Page { items, next_cursor })
     }
 
     pub(crate) async fn get_bytes(&self, path: &str) -> Result<(HeaderMap, Vec<u8>)> {
         let path = self.auth_path(path);
+        let safe_path = redact_access_token(&path);
         let url = format!("{}{}", self.api_base, path);
-        tracing::debug!(target: "skill-library-gitee", method = "GET", path = %path);
+        tracing::debug!(target: "skill-library-gitee", method = "GET", path = %safe_path);
         let response =
             self.client
                 .get(url)
@@ -118,9 +121,18 @@ impl GiteeProvider {
         let headers = response.headers().clone();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_else(|_| status.to_string());
+            let body = snippet(&body);
+            tracing::warn!(
+                target: "skill-library-gitee",
+                method = "GET",
+                path = %safe_path,
+                status = status.as_u16(),
+                body = %body,
+                "non-success response"
+            );
             return Err(crate::http::provider_error_from_status(
                 status,
-                format!("GET {path} ({status}): {}", crate::util::snippet(&body)),
+                format!("GET {safe_path} ({status}): {body}"),
             ));
         }
         let bytes = response

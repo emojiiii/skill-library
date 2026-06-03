@@ -4,7 +4,6 @@ import { useLocale } from "../hooks/useLocale";
 import type { DiagnosticsExport } from "../lib/skill-library";
 import { Card } from "../widgets/Card";
 import { MetricTile } from "../widgets/MetricTile";
-import { Pill } from "../widgets/Pill";
 
 export function CliPage({
   diagnostics,
@@ -32,7 +31,7 @@ export function CliPage({
             <div className="min-w-0">
               <Card.Title>{t("cli.diagnostics")}</Card.Title>
               <Card.Subtitle className="truncate">
-                {diagnostics?.outputDir ?? "~/.skill-library/tmp/diagnostics"}
+                {diagnostics?.archivePath ?? "~/Downloads/skill-library-diagnostics.zip"}
               </Card.Subtitle>
             </div>
             <div className="flex flex-wrap justify-end gap-2">
@@ -78,11 +77,9 @@ export function CliPage({
             </div>
           ) : null}
 
-          {diagnostics?.notes.length ? (
-            <div className="mt-3 flex flex-wrap gap-1.5">
-              {diagnostics.notes.map((note) => (
-                <Pill key={note}>{note}</Pill>
-              ))}
+          {diagnostics ? (
+            <div className="mt-3 rounded-md border border-[var(--border-subtle)] bg-[var(--surface-muted)] px-3 py-2 text-xs text-[var(--text-muted)]">
+              {t("cli.diagnosticsSafeExport")}
             </div>
           ) : null}
         </Card>

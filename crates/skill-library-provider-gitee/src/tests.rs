@@ -7,6 +7,7 @@ use skill_library_provider::{
 };
 use std::io::Write;
 
+use crate::util::redact_access_token;
 use crate::GiteeProvider;
 
 #[test]
@@ -16,6 +17,18 @@ fn gitee_provider_reports_instance_id() {
             .unwrap();
 
     assert_eq!(SkillSourceProvider::id(&provider), "gitee.enterprise");
+}
+
+#[test]
+fn redact_access_token_preserves_query_shape() {
+    let redacted =
+        redact_access_token("/api/v5/repos/acme/team?access_token=secret-token&recursive=1");
+
+    assert_eq!(
+        redacted,
+        "/api/v5/repos/acme/team?access_token=[REDACTED]&recursive=1"
+    );
+    assert!(!redacted.contains("secret-token"));
 }
 
 #[tokio::test]

@@ -5,8 +5,9 @@ mod db;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use skill_library_core::{
-    normalize_provider_id, AppPaths, AuthMode, GitHubCredential, ProviderCredential,
-    ProviderCredentialMetadata, ProviderInstance, ProviderKind, WorkspaceRef,
+    is_diagnostics_log_file, normalize_provider_id, redact_sensitive_diagnostics_text, AppPaths,
+    AuthMode, GitHubCredential, ProviderCredential, ProviderCredentialMetadata, ProviderInstance,
+    ProviderKind, WorkspaceRef,
 };
 use skill_library_installer::{InstallMetadata, InstallOptions, InstallReport, TargetRoot};
 use skill_library_manifest::{effective_risk, SemanticChange, SkillAsset};
@@ -19,6 +20,7 @@ use skill_library_provider_github::{
     CommitSummary, GitHubProvider, GitHubPublishFile, GitHubPublishInput, IssueComment,
     PullRequestQueryState, PullRequestSummary, RepositoryEvent, RepositoryInvitation,
 };
+use skill_library_provider_gitlab::GitLabProvider;
 use skill_library_publish::{PublishPackage, PublishPolicyResult, PublishRequestSummary};
 use skill_library_sync::{
     RemoteWorkspaceSkills, StoredWorkspace, Subscription, SubscriptionsFile, SyncOptions,
@@ -27,6 +29,7 @@ use skill_library_sync::{
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -230,6 +233,7 @@ struct PublishDraftInput {
 struct DiagnosticsExport {
     exported_at: String,
     output_dir: PathBuf,
+    archive_path: PathBuf,
     app_home: PathBuf,
     subscriptions: usize,
     workspaces: usize,
@@ -558,9 +562,18 @@ async fn login_provider_token(
         let auth_mode = auth_mode
             .or_else(|| instance.auth_modes.first().cloned())
             .unwrap_or(AuthMode::PersonalAccessToken);
-        let login = login
+        let mut login = login
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
+        if matches!(instance.kind, ProviderKind::GitLab) {
+            let provider = GitLabProvider::for_instance(&instance, Some(token.clone()))
+                .map_err(provider_command_error)?;
+            let token_info = provider
+                .validate_token()
+                .await
+                .map_err(provider_command_error)?;
+            login = Some(token_info.login);
+        }
         skill_library_core::save_provider_credential(
             &paths.credentials,
             ProviderCredential {
@@ -3857,10 +3870,12 @@ fn is_skill_library_publish_branch(branch: &str) -> bool {
 }
 
 #[tauri::command]
-fn export_diagnostics() -> CommandResult<DiagnosticsExport> {
+fn export_diagnostics(app: tauri::AppHandle) -> CommandResult<DiagnosticsExport> {
     let paths = AppPaths::resolve()?;
     skill_library_sync::ensure_local_state(&paths)?;
-    export_diagnostics_bundle(&paths)
+    let export = export_diagnostics_bundle(&paths)?;
+    reveal_path_in_file_manager(&app, &export.archive_path)?;
+    Ok(export)
 }
 
 #[tauri::command]
@@ -3875,15 +3890,18 @@ fn open_logs_folder(app: tauri::AppHandle) -> CommandResult<()> {
 
 fn export_diagnostics_bundle(paths: &AppPaths) -> CommandResult<DiagnosticsExport> {
     let exported_at = chrono::Utc::now();
-    let output_dir = paths
+    let output_dir = diagnostics_download_dir(paths);
+    let archive_path = diagnostics_archive_path(&output_dir, exported_at);
+    let staging_dir = paths
         .tmp
         .join("diagnostics")
         .join(exported_at.format("%Y%m%dT%H%M%SZ").to_string());
+    fs::create_dir_all(&staging_dir).map_err(CommandError::from)?;
     fs::create_dir_all(&output_dir).map_err(CommandError::from)?;
     let subscriptions = skill_library_sync::read_subscriptions(&paths.subscriptions)?;
     let workspaces = skill_library_sync::read_workspaces(&paths.workspace_registry)?;
     fs::write(
-        output_dir.join("summary.json"),
+        staging_dir.join("summary.json"),
         serde_json::to_vec_pretty(&serde_json::json!({
             "exportedAt": exported_at,
             "appHome": paths.home,
@@ -3894,20 +3912,27 @@ fn export_diagnostics_bundle(paths: &AppPaths) -> CommandResult<DiagnosticsExpor
     )
     .map_err(CommandError::from)?;
     fs::write(
-        output_dir.join("subscriptions.json"),
+        staging_dir.join("subscriptions.json"),
         serde_json::to_vec_pretty(&subscriptions).map_err(CommandError::from)?,
     )
     .map_err(CommandError::from)?;
     fs::write(
-        output_dir.join("workspaces.json"),
+        staging_dir.join("workspaces.json"),
         serde_json::to_vec_pretty(&workspaces).map_err(CommandError::from)?,
     )
     .map_err(CommandError::from)?;
 
-    let logs = copy_sanitized_logs(&paths.logs, &output_dir.join("logs"))?;
+    let logs = copy_sanitized_logs(&paths.logs, &staging_dir.join("logs"))?
+        .into_iter()
+        .filter_map(|path| {
+            path.file_name()
+                .map(|file_name| PathBuf::from("logs").join(file_name))
+        })
+        .collect();
     let export = DiagnosticsExport {
         exported_at: exported_at.to_rfc3339(),
         output_dir,
+        archive_path,
         app_home: paths.home.clone(),
         subscriptions: subscriptions.subscriptions.len(),
         workspaces: workspaces.workspaces.len(),
@@ -3918,11 +3943,27 @@ fn export_diagnostics_bundle(paths: &AppPaths) -> CommandResult<DiagnosticsExpor
         ],
     };
     fs::write(
-        export.output_dir.join("diagnostics.json"),
+        staging_dir.join("diagnostics.json"),
         serde_json::to_vec_pretty(&export).map_err(CommandError::from)?,
     )
     .map_err(CommandError::from)?;
+    zip_directory(&staging_dir, &export.archive_path)?;
+    let _ = fs::remove_dir_all(&staging_dir);
     Ok(export)
+}
+
+fn diagnostics_download_dir(paths: &AppPaths) -> PathBuf {
+    dirs::download_dir().unwrap_or_else(|| paths.tmp.join("diagnostics"))
+}
+
+fn diagnostics_archive_path(
+    output_dir: &Path,
+    exported_at: chrono::DateTime<chrono::Utc>,
+) -> PathBuf {
+    output_dir.join(format!(
+        "skill-library-diagnostics-{}.zip",
+        exported_at.format("%Y%m%dT%H%M%SZ")
+    ))
 }
 
 fn copy_sanitized_logs(logs_dir: &Path, output_dir: &Path) -> CommandResult<Vec<PathBuf>> {
@@ -3933,7 +3974,7 @@ fn copy_sanitized_logs(logs_dir: &Path, output_dir: &Path) -> CommandResult<Vec<
     let mut copied = Vec::new();
     for entry in fs::read_dir(logs_dir).map_err(CommandError::from)? {
         let source = entry.map_err(CommandError::from)?.path();
-        if !source.is_file() || source.extension().and_then(|value| value.to_str()) != Some("log") {
+        if !source.is_file() || !is_diagnostics_log_file(&source) {
             continue;
         }
         let Some(file_name) = source.file_name() else {
@@ -3941,47 +3982,109 @@ fn copy_sanitized_logs(logs_dir: &Path, output_dir: &Path) -> CommandResult<Vec<
         };
         let destination = output_dir.join(file_name);
         let raw = fs::read_to_string(&source).unwrap_or_else(|_| "<binary log omitted>".to_owned());
-        fs::write(&destination, redact_sensitive_text(&raw)).map_err(CommandError::from)?;
+        fs::write(&destination, redact_sensitive_diagnostics_text(&raw))
+            .map_err(CommandError::from)?;
         copied.push(destination);
     }
     copied.sort();
     Ok(copied)
 }
 
-fn redact_sensitive_text(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut output = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index..].starts_with(b"GITHUB_TOKEN") {
-            output.extend_from_slice(b"[REDACTED]");
-            index += b"GITHUB_TOKEN".len();
-            continue;
-        }
-        if let Some(prefix) = github_token_prefix(&bytes[index..]) {
-            output.extend_from_slice(b"[REDACTED]");
-            index += prefix.len();
-            while index < bytes.len() && is_github_token_char(bytes[index]) {
-                index += 1;
+fn zip_directory(source_dir: &Path, archive_path: &Path) -> CommandResult<()> {
+    let archive = fs::File::create(archive_path).map_err(CommandError::from)?;
+    let mut writer = zip::ZipWriter::new(archive);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .unix_permissions(0o644);
+    append_zip_entries(source_dir, source_dir, &mut writer, options)?;
+    writer
+        .finish()
+        .map_err(|err| CommandError::coded("diagnostics_zip_failed", err.to_string()))?;
+    Ok(())
+}
+
+fn append_zip_entries<W: Write + std::io::Seek>(
+    root: &Path,
+    directory: &Path,
+    writer: &mut zip::ZipWriter<W>,
+    options: zip::write::SimpleFileOptions,
+) -> CommandResult<()> {
+    let mut entries = fs::read_dir(directory)
+        .map_err(CommandError::from)?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CommandError::from)?;
+    entries.sort_by_key(|entry| entry.path());
+
+    for entry in entries {
+        let path = entry.path();
+        let name = zip_entry_name(root, &path)?;
+        if path.is_dir() {
+            if !name.is_empty() {
+                writer
+                    .add_directory(format!("{name}/"), options)
+                    .map_err(|err| {
+                        CommandError::coded("diagnostics_zip_failed", err.to_string())
+                    })?;
             }
+            append_zip_entries(root, &path, writer, options)?;
             continue;
         }
-        output.push(bytes[index]);
-        index += 1;
+
+        writer
+            .start_file(name, options)
+            .map_err(|err| CommandError::coded("diagnostics_zip_failed", err.to_string()))?;
+        let mut file = fs::File::open(&path).map_err(CommandError::from)?;
+        let mut buffer = Vec::new();
+        file.read_to_end(&mut buffer).map_err(CommandError::from)?;
+        writer
+            .write_all(&buffer)
+            .map_err(|err| CommandError::coded("diagnostics_zip_failed", err.to_string()))?;
     }
-    String::from_utf8(output).unwrap_or_else(|_| "[REDACTED]".to_owned())
+    Ok(())
 }
 
-fn github_token_prefix(value: &[u8]) -> Option<&'static [u8]> {
-    const PREFIXES: &[&[u8]] = &[b"github_pat_", b"ghp_", b"gho_", b"ghu_", b"ghs_", b"ghr_"];
-    PREFIXES
+fn zip_entry_name(root: &Path, path: &Path) -> CommandResult<String> {
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|err| CommandError::coded("diagnostics_zip_failed", err.to_string()))?;
+    Ok(relative
         .iter()
-        .copied()
-        .find(|prefix| value.starts_with(prefix))
+        .map(|component| component.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/"))
 }
 
-fn is_github_token_char(value: u8) -> bool {
-    value.is_ascii_alphanumeric() || value == b'_' || value == b'-'
+fn reveal_path_in_file_manager(_app: &tauri::AppHandle, path: &Path) -> CommandResult<()> {
+    #[cfg(target_os = "macos")]
+    {
+        spawn_path_command("/usr/bin/open", ["-R"], path)?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("explorer")
+            .arg(format!("/select,{}", path.display()))
+            .spawn()
+            .map_err(|err| {
+                CommandError::coded(
+                    "open_path_failed",
+                    format!("failed to launch explorer: {err}"),
+                )
+            })?;
+        return Ok(());
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let directory = if path.is_dir() {
+            path
+        } else {
+            path.parent().unwrap_or(path)
+        };
+        open_with_system_default(_app, directory)?;
+        Ok(())
+    }
 }
 
 fn register_deep_link<R: tauri::Runtime>(app: &tauri::AppHandle<R>, url: Url) {
@@ -6313,7 +6416,7 @@ fn init_tracing() {
 
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         EnvFilter::new(
-            "info,skill-library=debug,skill_library_github=debug,skill-library-github=debug",
+            "info,skill-library=debug,skill_library_github=debug,skill-library-github=debug,skill-library-gitlab=debug,skill-library-gitee=debug,skill-library-webdav=debug",
         )
     });
 
@@ -6658,9 +6761,8 @@ pub fn run() {
 mod tests {
     use super::{
         default_runtime_targets, discussions_status_for_provider, humanize_agent_dir_name,
-        local_agent_root_specs, parse_workspace_with_instances, redact_sensitive_text,
-        unsupported_capability_error, validate_provider_url, CommandError,
-        PublishChangeRequestSummary,
+        local_agent_root_specs, parse_workspace_with_instances, unsupported_capability_error,
+        validate_provider_url, zip_directory, CommandError, PublishChangeRequestSummary,
     };
     use skill_library_core::{AuthMode, ProviderInstance, ProviderKind};
     use std::path::Path;
@@ -6675,6 +6777,23 @@ mod tests {
 
         assert_eq!(value["code"], "missing_github_token");
         assert_eq!(value["message"], "GitHub token is required");
+    }
+
+    #[test]
+    fn diagnostics_zip_directory_creates_archive_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("bundle");
+        let logs = source.join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(source.join("summary.json"), "{}").unwrap();
+        std::fs::write(logs.join("skill-library.log.2026-06-03"), "warn").unwrap();
+        let archive = dir.path().join("bundle.zip");
+
+        zip_directory(&source, &archive).unwrap();
+
+        let bytes = std::fs::read(&archive).unwrap();
+        assert!(bytes.starts_with(b"PK"));
+        assert!(bytes.len() > 32);
     }
 
     #[test]
@@ -6782,18 +6901,6 @@ mod tests {
 
         assert_eq!(summary.number, 7);
         assert_eq!(summary.provider_kind, "pull_request");
-    }
-
-    #[test]
-    fn diagnostics_redaction_removes_token_like_values() {
-        let redacted = redact_sensitive_text(
-            "ghp_abcdefghijklmnopqrstuvwxyz123456 github_pat_11_secret GITHUB_TOKEN",
-        );
-
-        assert!(!redacted.contains("ghp_"));
-        assert!(!redacted.contains("github_pat_"));
-        assert!(!redacted.contains("GITHUB_TOKEN"));
-        assert_eq!(redacted.matches("[REDACTED]").count(), 3);
     }
 
     #[test]

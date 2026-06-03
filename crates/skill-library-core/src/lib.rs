@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub type Result<T> = std::result::Result<T, SkillLibraryError>;
 
@@ -167,6 +167,135 @@ pub fn normalize_provider_id(value: &str) -> String {
         "github" => "github.com".to_owned(),
         other => other.to_owned(),
     }
+}
+
+pub fn is_diagnostics_log_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .map(|name| name.ends_with(".log") || name.contains(".log."))
+        .unwrap_or(false)
+}
+
+pub fn redact_sensitive_diagnostics_text(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if let Some(prefix_len) = secret_query_prefix_len(&bytes[index..]) {
+            output.extend_from_slice(&bytes[index..index + prefix_len]);
+            output.extend_from_slice(b"[REDACTED]");
+            index += prefix_len;
+            while index < bytes.len() && !is_query_secret_terminator(bytes[index]) {
+                index += 1;
+            }
+            continue;
+        }
+        if let Some((prefix_len, preserve_scheme)) = secret_header_prefix(&bytes[index..]) {
+            output.extend_from_slice(&bytes[index..index + prefix_len]);
+            index += prefix_len;
+            while index < bytes.len() && matches!(bytes[index], b' ' | b'\t') {
+                output.push(bytes[index]);
+                index += 1;
+            }
+            if preserve_scheme {
+                if let Some(scheme_len) = authorization_scheme_len(&bytes[index..]) {
+                    output.extend_from_slice(&bytes[index..index + scheme_len]);
+                    index += scheme_len;
+                    while index < bytes.len() && matches!(bytes[index], b' ' | b'\t') {
+                        output.push(bytes[index]);
+                        index += 1;
+                    }
+                }
+            }
+            output.extend_from_slice(b"[REDACTED]");
+            while index < bytes.len() && !is_secret_value_terminator(bytes[index]) {
+                index += 1;
+            }
+            continue;
+        }
+        if bytes[index..].starts_with(b"GITHUB_TOKEN") {
+            output.extend_from_slice(b"[REDACTED]");
+            index += b"GITHUB_TOKEN".len();
+            continue;
+        }
+        if let Some(prefix) = github_token_prefix(&bytes[index..]) {
+            output.extend_from_slice(b"[REDACTED]");
+            index += prefix.len();
+            while index < bytes.len() && is_github_token_char(bytes[index]) {
+                index += 1;
+            }
+            continue;
+        }
+        output.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8(output).unwrap_or_else(|_| "[REDACTED]".to_owned())
+}
+
+fn secret_query_prefix_len(value: &[u8]) -> Option<usize> {
+    const PREFIXES: &[&[u8]] = &[
+        b"access_token=",
+        b"private_token=",
+        b"refresh_token=",
+        b"id_token=",
+    ];
+    PREFIXES
+        .iter()
+        .find(|prefix| starts_with_ascii_case_insensitive(value, prefix))
+        .map(|prefix| prefix.len())
+}
+
+fn secret_header_prefix(value: &[u8]) -> Option<(usize, bool)> {
+    if starts_with_ascii_case_insensitive(value, b"authorization:") {
+        return Some((b"authorization:".len(), true));
+    }
+    if starts_with_ascii_case_insensitive(value, b"private-token:") {
+        return Some((b"private-token:".len(), false));
+    }
+    None
+}
+
+fn authorization_scheme_len(value: &[u8]) -> Option<usize> {
+    [b"bearer".as_slice(), b"basic".as_slice()]
+        .iter()
+        .find(|scheme| {
+            starts_with_ascii_case_insensitive(value, scheme)
+                && value
+                    .get(scheme.len())
+                    .is_some_and(|next| matches!(next, b' ' | b'\t'))
+        })
+        .map(|scheme| scheme.len())
+}
+
+fn starts_with_ascii_case_insensitive(value: &[u8], prefix: &[u8]) -> bool {
+    value.len() >= prefix.len()
+        && value
+            .iter()
+            .zip(prefix.iter())
+            .all(|(left, right)| left.to_ascii_lowercase() == right.to_ascii_lowercase())
+}
+
+fn is_query_secret_terminator(value: u8) -> bool {
+    is_secret_value_terminator(value) || value == b'&'
+}
+
+fn is_secret_value_terminator(value: u8) -> bool {
+    matches!(
+        value,
+        b' ' | b'\t' | b'\n' | b'\r' | b'"' | b'\'' | b',' | b'}' | b']' | b'<' | b'>'
+    )
+}
+
+fn github_token_prefix(value: &[u8]) -> Option<&'static [u8]> {
+    const PREFIXES: &[&[u8]] = &[b"github_pat_", b"ghp_", b"gho_", b"ghu_", b"ghs_", b"ghr_"];
+    PREFIXES
+        .iter()
+        .copied()
+        .find(|prefix| value.starts_with(prefix))
+}
+
+fn is_github_token_char(value: u8) -> bool {
+    value.is_ascii_alphanumeric() || value == b'_' || value == b'-'
 }
 
 fn deserialize_provider_id<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
@@ -806,6 +935,35 @@ mod tests {
     fn workspace_storage_key_is_stable() {
         let workspace = WorkspaceRef::github("acme", "team-skills");
         assert_eq!(workspace.storage_key(), "github.com--acme--team-skills");
+    }
+
+    #[test]
+    fn diagnostics_redaction_removes_token_like_values() {
+        let redacted = redact_sensitive_diagnostics_text(
+            "ghp_abcdefghijklmnopqrstuvwxyz123456 github_pat_11_secret GITHUB_TOKEN access_token=gitee-secret&x=1 PRIVATE-TOKEN: glpat-secret Authorization: Bearer bearer-secret",
+        );
+
+        assert!(!redacted.contains("ghp_"));
+        assert!(!redacted.contains("github_pat_"));
+        assert!(!redacted.contains("GITHUB_TOKEN"));
+        assert!(!redacted.contains("gitee-secret"));
+        assert!(!redacted.contains("glpat-secret"));
+        assert!(!redacted.contains("bearer-secret"));
+        assert!(redacted.contains("access_token=[REDACTED]&x=1"));
+        assert_eq!(redacted.matches("[REDACTED]").count(), 6);
+    }
+
+    #[test]
+    fn diagnostics_log_file_filter_includes_rotated_tracing_logs() {
+        assert!(is_diagnostics_log_file(std::path::Path::new(
+            "2026-06-03.log"
+        )));
+        assert!(is_diagnostics_log_file(std::path::Path::new(
+            "skill-library.log.2026-06-03"
+        )));
+        assert!(!is_diagnostics_log_file(std::path::Path::new(
+            "diagnostics.json"
+        )));
     }
 
     #[test]

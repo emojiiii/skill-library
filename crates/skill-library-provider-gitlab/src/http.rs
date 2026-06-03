@@ -18,17 +18,35 @@ pub(crate) async fn map_response<T: for<'de> Deserialize<'de>>(
             })?;
         return serde_json::from_slice::<T>(&bytes).map_err(|err| {
             let body = String::from_utf8_lossy(&bytes);
+            let body = snippet(&body);
+            tracing::error!(
+                target: "skill-library-gitlab",
+                method,
+                path,
+                status = status.as_u16(),
+                body = %body,
+                error = %err,
+                "deserialize failed"
+            );
             ProviderError::InvalidResponse(format!(
-                "{method} {path} ({status}): deserialize failed: {err} - body: {}",
-                snippet(&body)
+                "{method} {path} ({status}): deserialize failed: {err} - body: {body}"
             ))
         });
     }
 
     let message = response.text().await.unwrap_or_else(|_| status.to_string());
+    let body = snippet(&message);
+    tracing::warn!(
+        target: "skill-library-gitlab",
+        method,
+        path,
+        status = status.as_u16(),
+        body = %body,
+        "non-success response"
+    );
     Err(provider_error_from_status(
         status,
-        format!("{method} {path} ({status}): {}", snippet(&message)),
+        format!("{method} {path} ({status}): {body}"),
     ))
 }
 

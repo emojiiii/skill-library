@@ -27,12 +27,14 @@ tauri-plugin-opener = "2.5.2"
 tauri-plugin-single-instance = { version = "2.4.2", features = ["deep-link"] }
 tauri = { version = "2", features = [] }
 url.workspace = true
+zip.workspace = true
 skill-library-core = { path = "../../../crates/skill-library-core" }
 skill-library-installer = { path = "../../../crates/skill-library-installer" }
 skill-library-manifest = { path = "../../../crates/skill-library-manifest" }
 skill-library-publish = { path = "../../../crates/skill-library-publish" }
 skill-library-provider = { path = "../../../crates/skill-library-provider" }
 skill-library-provider-github = { path = "../../../crates/skill-library-provider-github" }
+skill-library-provider-gitlab = { path = "../../../crates/skill-library-provider-gitlab" }
 skill-library-sync = { path = "../../../crates/skill-library-sync" }
 thiserror.workspace = true
 tracing.workspace = true

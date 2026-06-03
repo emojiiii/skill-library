@@ -33,9 +33,10 @@ pub(crate) fn provider_error_from_status(status: StatusCode, message: String) ->
 pub(crate) fn snippet(value: &str) -> String {
     const MAX: usize = 240;
     let trimmed = value.trim();
-    if trimmed.len() > MAX {
-        format!("{}...", &trimmed[..MAX])
+    let snippet = trimmed.chars().take(MAX).collect::<String>();
+    if snippet.len() < trimmed.len() {
+        format!("{snippet}...")
     } else {
-        trimmed.to_owned()
+        snippet
     }
 }

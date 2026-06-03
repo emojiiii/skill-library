@@ -40,6 +40,7 @@ export interface AppStateSummary {
 export interface DiagnosticsExport {
   exportedAt: string;
   outputDir: string;
+  archivePath: string;
   appHome: string;
   subscriptions: number;
   workspaces: number;

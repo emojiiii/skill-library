@@ -50,6 +50,30 @@ async fn token_auth_uses_private_token_header_only() {
 }
 
 #[tokio::test]
+async fn validate_token_reads_current_user() {
+    let mut server = mockito::Server::new_async().await;
+    let mock = server
+        .mock("GET", "/api/v4/user")
+        .match_header("private-token", "pat-token")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"id":12,"username":"dev-user","name":"Dev User"}"#)
+        .create_async()
+        .await;
+    let provider = GitLabProvider::with_instance_base_url(
+        "gitlab.com",
+        format!("{}/api/v4", server.url()),
+        Some("pat-token".to_owned()),
+    )
+    .unwrap();
+
+    let info = provider.validate_token().await.unwrap();
+
+    mock.assert_async().await;
+    assert_eq!(info.login, "dev-user");
+}
+
+#[tokio::test]
 async fn get_source_encodes_nested_namespace() {
     let mut server = mockito::Server::new_async().await;
     let mock = server

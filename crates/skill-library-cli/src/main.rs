@@ -2,8 +2,9 @@ use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use skill_library_core::{
-    normalize_provider_id, AppPaths, AuthMode, ProviderCredential, ProviderCredentialMetadata,
-    ProviderInstance, ProviderKind, RiskLevel, SkillLibraryConfig, UpdatePolicy, WorkspaceRef,
+    is_diagnostics_log_file, normalize_provider_id, redact_sensitive_diagnostics_text, AppPaths,
+    AuthMode, ProviderCredential, ProviderCredentialMetadata, ProviderInstance, ProviderKind,
+    RiskLevel, SkillLibraryConfig, UpdatePolicy, WorkspaceRef,
 };
 use skill_library_installer::{InstallOptions, TargetRoot};
 use skill_library_manifest::SkillManifest;
@@ -328,7 +329,15 @@ fn init_logging(paths: &AppPaths, verbose: bool) -> anyhow::Result<PathBuf> {
     } else {
         BoxMakeWriter::new(file_writer)
     };
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        if verbose {
+            EnvFilter::new(
+                "info,skill-library=debug,skill_library_github=debug,skill-library-github=debug,skill-library-gitlab=debug,skill-library-gitee=debug,skill-library-webdav=debug",
+            )
+        } else {
+            EnvFilter::new("info")
+        }
+    });
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(writer)
@@ -1625,7 +1634,7 @@ fn copy_sanitized_logs(logs_dir: &Path, output_dir: &Path) -> anyhow::Result<Vec
     for entry in fs::read_dir(logs_dir)? {
         let entry = entry?;
         let source = entry.path();
-        if !source.is_file() || source.extension().and_then(|value| value.to_str()) != Some("log") {
+        if !source.is_file() || !is_diagnostics_log_file(&source) {
             continue;
         }
         let Some(file_name) = source.file_name() else {
@@ -1633,47 +1642,11 @@ fn copy_sanitized_logs(logs_dir: &Path, output_dir: &Path) -> anyhow::Result<Vec
         };
         let destination = output_dir.join(file_name);
         let raw = fs::read_to_string(&source).unwrap_or_else(|_| "<binary log omitted>".to_owned());
-        fs::write(&destination, redact_sensitive_text(&raw))?;
+        fs::write(&destination, redact_sensitive_diagnostics_text(&raw))?;
         copied.push(destination);
     }
     copied.sort();
     Ok(copied)
-}
-
-fn redact_sensitive_text(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut output = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index..].starts_with(b"GITHUB_TOKEN") {
-            output.extend_from_slice(b"[REDACTED]");
-            index += b"GITHUB_TOKEN".len();
-            continue;
-        }
-        if let Some(prefix) = github_token_prefix(&bytes[index..]) {
-            output.extend_from_slice(b"[REDACTED]");
-            index += prefix.len();
-            while index < bytes.len() && is_github_token_char(bytes[index]) {
-                index += 1;
-            }
-            continue;
-        }
-        output.push(bytes[index]);
-        index += 1;
-    }
-    String::from_utf8(output).unwrap_or_else(|_| "[REDACTED]".to_owned())
-}
-
-fn github_token_prefix(value: &[u8]) -> Option<&'static [u8]> {
-    const PREFIXES: &[&[u8]] = &[b"github_pat_", b"ghp_", b"gho_", b"ghu_", b"ghs_", b"ghr_"];
-    PREFIXES
-        .iter()
-        .copied()
-        .find(|prefix| value.starts_with(prefix))
-}
-
-fn is_github_token_char(value: u8) -> bool {
-    value.is_ascii_alphanumeric() || value == b'_' || value == b'-'
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1873,7 +1846,7 @@ fn parse_target_roots(values: Vec<String>) -> anyhow::Result<Vec<TargetRoot>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cli_error_code, cli_error_json, cli_log_path, friendly_api_error, redact_sensitive_text,
+        cli_error_code, cli_error_json, cli_log_path, friendly_api_error,
         unsupported_cli_capability_message, Command, DaemonPollReport, NotificationsResponse,
     };
 
@@ -1990,17 +1963,5 @@ mod tests {
 
         assert!(message.contains("WebDAV source"));
         assert!(message.contains("direct upload requires explicit confirmation"));
-    }
-
-    #[test]
-    fn redact_sensitive_text_removes_github_token_like_values() {
-        let redacted = redact_sensitive_text(
-            "token=ghp_abcdefghijklmnopqrstuvwxyz123456 and github_pat_11ABCDEFG_secret\nGITHUB_TOKEN",
-        );
-
-        assert!(!redacted.contains("ghp_"));
-        assert!(!redacted.contains("github_pat_"));
-        assert!(!redacted.contains("GITHUB_TOKEN"));
-        assert_eq!(redacted.matches("[REDACTED]").count(), 3);
     }
 }

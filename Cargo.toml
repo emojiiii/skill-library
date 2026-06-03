@@ -54,3 +54,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tracing-appender = "0.2"
 url = "2"
 walkdir = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }

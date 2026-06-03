@@ -43,6 +43,10 @@ use util::{
     validate_branch_ref, validate_repo_path,
 };
 
+fn log_snippet(value: &str) -> String {
+    value.chars().take(200).collect()
+}
+
 pub struct GitHubProvider {
     client: reqwest::Client,
     api_base: String,
@@ -225,7 +229,15 @@ impl GitHubProvider {
                 cause: err.to_string(),
             })?;
         if !status.is_success() {
-            let snippet: String = String::from_utf8_lossy(&bytes).chars().take(200).collect();
+            let snippet = log_snippet(&String::from_utf8_lossy(&bytes));
+            tracing::warn!(
+                target: "skill-library-github",
+                method = "POST",
+                path = "/graphql",
+                status = status.as_u16(),
+                body = %snippet,
+                "non-success response"
+            );
             return Err(provider_error_from_status(
                 status,
                 format!("POST /graphql ({status}): {snippet}"),
@@ -239,7 +251,16 @@ impl GitHubProvider {
             errors: Vec<serde_json::Value>,
         }
         let envelope: Envelope<T> = serde_json::from_slice(&bytes).map_err(|err| {
-            let snippet: String = String::from_utf8_lossy(&bytes).chars().take(200).collect();
+            let snippet = log_snippet(&String::from_utf8_lossy(&bytes));
+            tracing::error!(
+                target: "skill-library-github",
+                method = "POST",
+                path = "/graphql",
+                status = status.as_u16(),
+                body = %snippet,
+                error = %err,
+                "deserialize failed"
+            );
             ProviderError::InvalidResponse(format!(
                 "POST /graphql: deserialize failed: {err} — body: {snippet}"
             ))
@@ -324,6 +345,7 @@ impl GitHubProvider {
 
     pub async fn validate_token(&self) -> Result<GitHubTokenInfo> {
         let url = format!("{}/user", self.api_base);
+        tracing::debug!(target: "skill-library-github", method = "GET", path = "/user");
         let response =
             self.client
                 .get(url)
@@ -333,21 +355,49 @@ impl GitHubProvider {
                     cause: err.to_string(),
                 })?;
         let status = response.status();
-        if !status.is_success() {
-            let message = response.text().await.unwrap_or_else(|_| status.to_string());
-            return Err(provider_error_from_status(status, message));
-        }
-
         let scopes = response
             .headers()
             .get("x-oauth-scopes")
             .and_then(|value| value.to_str().ok())
             .map(parse_scope_header)
             .unwrap_or_default();
-        let user = response
-            .json::<GitHubUser>()
+        let bytes = response
+            .bytes()
             .await
-            .map_err(|err| ProviderError::InvalidResponse(err.to_string()))?;
+            .map_err(|err| ProviderError::NetworkError {
+                cause: err.to_string(),
+            })?;
+        if !status.is_success() {
+            let body = log_snippet(&String::from_utf8_lossy(&bytes));
+            tracing::warn!(
+                target: "skill-library-github",
+                method = "GET",
+                path = "/user",
+                status = status.as_u16(),
+                body = %body,
+                "non-success response"
+            );
+            return Err(provider_error_from_status(
+                status,
+                format!("GET /user ({status}): {body}"),
+            ));
+        }
+
+        let user = serde_json::from_slice::<GitHubUser>(&bytes).map_err(|err| {
+            let body = log_snippet(&String::from_utf8_lossy(&bytes));
+            tracing::error!(
+                target: "skill-library-github",
+                method = "GET",
+                path = "/user",
+                status = status.as_u16(),
+                body = %body,
+                error = %err,
+                "deserialize failed"
+            );
+            ProviderError::InvalidResponse(format!(
+                "GET /user ({status}): deserialize failed: {err} - body: {body}"
+            ))
+        })?;
         Ok(GitHubTokenInfo { user, scopes })
     }
 
@@ -391,6 +441,11 @@ impl GitHubProvider {
                 self.api_base, reference.owner, reference.repo, ref_name
             )
         };
+        let log_path = format!(
+            "/repos/{}/{}/tarball/{}",
+            reference.owner, reference.repo, ref_name
+        );
+        tracing::debug!(target: "skill-library-github", method = "GET", path = %log_path);
         let response =
             self.client
                 .get(url)
@@ -401,8 +456,20 @@ impl GitHubProvider {
                 })?;
         let status = response.status();
         if !status.is_success() {
-            let message = response.text().await.unwrap_or_else(|_| status.to_string());
-            return Err(provider_error_from_status(status, message));
+            let body = response.text().await.unwrap_or_else(|_| status.to_string());
+            let body = log_snippet(&body);
+            tracing::warn!(
+                target: "skill-library-github",
+                method = "GET",
+                path = %log_path,
+                status = status.as_u16(),
+                body = %body,
+                "non-success response"
+            );
+            return Err(provider_error_from_status(
+                status,
+                format!("GET {log_path} ({status}): {body}"),
+            ));
         }
 
         let total = response.content_length();
@@ -725,7 +792,8 @@ impl GitHubProvider {
             "{}/user/repository_invitations/{invitation_id}",
             self.api_base
         );
-        tracing::debug!(target: "skill-library-github", method = "PATCH", invitation_id);
+        let path = format!("/user/repository_invitations/{invitation_id}");
+        tracing::debug!(target: "skill-library-github", method = "PATCH", path = %path);
         let response =
             self.client
                 .patch(url)
@@ -739,9 +807,18 @@ impl GitHubProvider {
             return Ok(());
         }
         let body = response.text().await.unwrap_or_else(|_| status.to_string());
+        let body = log_snippet(&body);
+        tracing::warn!(
+            target: "skill-library-github",
+            method = "PATCH",
+            path = %path,
+            status = status.as_u16(),
+            body = %body,
+            "non-success response"
+        );
         Err(provider_error_from_status(
             status,
-            format!("PATCH /user/repository_invitations/{invitation_id} ({status}): {body}"),
+            format!("PATCH {path} ({status}): {body}"),
         ))
     }
 

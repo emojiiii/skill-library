@@ -623,10 +623,13 @@ const zh: Record<string, string> = {
   // --- CLI Page ---
   "cli.diagnostics": "诊断包",
   "cli.export": "导出",
+  "cli.exportSuccess": "诊断包已导出",
+  "cli.exportSuccessDesc": "已保存并打开：{path}",
   "cli.openLogs": "打开日志",
   "cli.subscriptions": "订阅",
   "cli.workspaces": "工作区",
   "cli.logs": "日志",
+  "cli.diagnosticsSafeExport": "已排除 credentials.json 和系统钥匙串凭据；日志已复制并自动脱敏。",
 
   // --- Subscriptions Page (extra) ---
   "subscriptions.hint.synced": "从本地 subscriptions.yaml 同步",
@@ -1337,10 +1340,14 @@ const en: Record<string, string> = {
   // --- CLI Page ---
   "cli.diagnostics": "Diagnostics bundle",
   "cli.export": "Export",
+  "cli.exportSuccess": "Diagnostics exported",
+  "cli.exportSuccessDesc": "Saved and opened: {path}",
   "cli.openLogs": "Open logs",
   "cli.subscriptions": "Subscriptions",
   "cli.workspaces": "Workspaces",
   "cli.logs": "Logs",
+  "cli.diagnosticsSafeExport":
+    "credentials.json and OS keychain secrets are excluded; copied logs are automatically redacted.",
 
   // --- Subscriptions Page (extra) ---
   "subscriptions.hint.synced": "Synced from local subscriptions.yaml",

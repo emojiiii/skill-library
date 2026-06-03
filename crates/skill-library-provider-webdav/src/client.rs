@@ -65,6 +65,12 @@ impl WebDavProvider {
         let request_path = collection_request_path(collection_path);
         let method = Method::from_bytes(b"PROPFIND")
             .map_err(|err| ProviderError::InvalidResponse(err.to_string()))?;
+        tracing::debug!(
+            target: "skill-library-webdav",
+            method = "PROPFIND",
+            path = %request_path,
+            depth
+        );
         let response = self
             .request(method, &request_path)?
             .header("Depth", depth)
@@ -78,9 +84,18 @@ impl WebDavProvider {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_else(|_| status.to_string());
+            let body = snippet(&body);
+            tracing::warn!(
+                target: "skill-library-webdav",
+                method = "PROPFIND",
+                path = %request_path,
+                status = status.as_u16(),
+                body = %body,
+                "non-success response"
+            );
             return Err(provider_error_from_status(
                 status,
-                format!("PROPFIND {collection_path} ({status}): {}", snippet(&body)),
+                format!("PROPFIND {collection_path} ({status}): {body}"),
             ));
         }
         let body = response
@@ -93,6 +108,7 @@ impl WebDavProvider {
     }
 
     pub(crate) async fn get_bytes(&self, path: &str) -> Result<(HeaderMap, Vec<u8>)> {
+        tracing::debug!(target: "skill-library-webdav", method = "GET", path);
         let response = self
             .request(Method::GET, path)?
             .send()
@@ -104,9 +120,18 @@ impl WebDavProvider {
         let headers = response.headers().clone();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_else(|_| status.to_string());
+            let body = snippet(&body);
+            tracing::warn!(
+                target: "skill-library-webdav",
+                method = "GET",
+                path,
+                status = status.as_u16(),
+                body = %body,
+                "non-success response"
+            );
             return Err(provider_error_from_status(
                 status,
-                format!("GET {path} ({status}): {}", snippet(&body)),
+                format!("GET {path} ({status}): {body}"),
             ));
         }
         let bytes = response

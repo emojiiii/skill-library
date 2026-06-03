@@ -282,6 +282,7 @@ export function RootLayout() {
         workspace: ws,
         assetId: deepLink.assetId ?? "",
         version: deepLink.version ?? undefined,
+        update: deepLink.version ? "pin" : "auto-patch",
         targets: deepLink.targets.length ? deepLink.targets : targets,
       });
       return ws;

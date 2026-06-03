@@ -142,7 +142,6 @@ pub struct LockedAsset {
 pub enum UpdateDecision {
     Install { version: String },
     Keep { reason: String },
-    Manual { version: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -473,16 +472,16 @@ pub fn decide_update(
     latest: &str,
     pinned: bool,
 ) -> Result<UpdateDecision> {
-    if pinned || matches!(policy, UpdatePolicy::Pin) {
-        return Ok(UpdateDecision::Keep {
-            reason: "pinned".to_owned(),
-        });
-    }
     let Some(current) = current else {
         return Ok(UpdateDecision::Install {
             version: latest.to_owned(),
         });
     };
+    if pinned || matches!(policy, UpdatePolicy::Pin | UpdatePolicy::Manual) {
+        return Ok(UpdateDecision::Keep {
+            reason: "pinned".to_owned(),
+        });
+    }
     if current == latest {
         return Ok(UpdateDecision::Keep {
             reason: "already current".to_owned(),
@@ -509,9 +508,6 @@ pub fn decide_update(
                 version: latest.to_owned(),
             })
         }
-        UpdatePolicy::Manual => Ok(UpdateDecision::Manual {
-            version: latest.to_owned(),
-        }),
         _ => Ok(UpdateDecision::Keep {
             reason: "policy does not allow automatic update".to_owned(),
         }),
@@ -1710,11 +1706,11 @@ mod tests {
     }
 
     #[test]
-    fn manual_policy_reports_available_update_without_installing() {
+    fn legacy_manual_policy_keeps_current_install() {
         assert_eq!(
             decide_update(&UpdatePolicy::Manual, Some("1.2.3"), "1.2.4", false).unwrap(),
-            UpdateDecision::Manual {
-                version: "1.2.4".to_owned()
+            UpdateDecision::Keep {
+                reason: "pinned".to_owned()
             }
         );
     }
@@ -1738,7 +1734,7 @@ mod tests {
     #[test]
     fn missing_or_current_versions_do_not_create_false_updates() {
         assert_eq!(
-            decide_update(&UpdatePolicy::Manual, None, "1.2.3", false).unwrap(),
+            decide_update(&UpdatePolicy::AutoPatch, None, "1.2.3", false).unwrap(),
             UpdateDecision::Install {
                 version: "1.2.3".to_owned()
             }
@@ -1781,7 +1777,7 @@ mod tests {
                 asset_id: "code-reviewer".to_owned(),
                 channel: "stable".to_owned(),
                 version: None,
-                update: UpdatePolicy::Manual,
+                update: UpdatePolicy::AutoPatch,
                 targets: TargetSelection::all_default(),
                 subscribed_at: None,
             },
@@ -1866,7 +1862,7 @@ description: Creates polished interfaces.
                 asset_id: "code-reviewer".to_owned(),
                 channel: "stable".to_owned(),
                 version: None,
-                update: UpdatePolicy::Manual,
+                update: UpdatePolicy::AutoPatch,
                 targets: TargetSelection::default(),
                 subscribed_at: None,
             },
@@ -1956,7 +1952,7 @@ targets:
                 asset_id: "code-reviewer".to_owned(),
                 channel: "stable".to_owned(),
                 version: Some("1.2.3".to_owned()),
-                update: UpdatePolicy::Manual,
+                update: UpdatePolicy::Pin,
                 targets: TargetSelection {
                     claude_code: true,
                     cursor: false,
@@ -2022,7 +2018,7 @@ permissions:
                 asset_id: "code-reviewer".to_owned(),
                 channel: "stable".to_owned(),
                 version: Some("1.2.3".to_owned()),
-                update: UpdatePolicy::Manual,
+                update: UpdatePolicy::Pin,
                 targets: TargetSelection {
                     claude_code: true,
                     cursor: false,

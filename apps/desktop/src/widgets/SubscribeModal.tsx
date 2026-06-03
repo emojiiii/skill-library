@@ -1,10 +1,9 @@
 import { Button, Modal, Switch } from "@heroui/react";
 import { useEffect, useState } from "react";
 import { useLocale } from "../hooks/useLocale";
-import type { SkillAsset } from "../lib/skill-library";
+import type { SkillAsset, UpdatePolicy } from "../lib/skill-library";
 import { Pill } from "../widgets/Pill";
 
-export type UpdatePolicy = "auto-patch" | "auto-minor" | "manual" | "pin";
 export type Channel = "stable" | "beta";
 
 const targets = [
@@ -13,10 +12,9 @@ const targets = [
 ];
 const targetIds = new Set(targets.map((target) => target.id));
 
-const policies: Array<{ id: UpdatePolicy; labelKey: string; descKey: string }> = [
+export const UPDATE_POLICIES: Array<{ id: UpdatePolicy; labelKey: string; descKey: string }> = [
   { id: "auto-patch", labelKey: "subscribe.policy.autoPatch", descKey: "subscribe.policy.autoPatch.desc" },
   { id: "auto-minor", labelKey: "subscribe.policy.autoMinor", descKey: "subscribe.policy.autoMinor.desc" },
-  { id: "manual", labelKey: "subscribe.policy.manual", descKey: "subscribe.policy.manual.desc" },
   { id: "pin", labelKey: "subscribe.policy.pin", descKey: "subscribe.policy.pin.desc" },
 ];
 
@@ -30,6 +28,7 @@ export function SubscribeModal({
   asset,
   workspaceFullName,
   initialTargets,
+  initialPolicy = "auto-patch",
   onConfirm,
   pending,
 }: {
@@ -38,7 +37,8 @@ export function SubscribeModal({
   asset: SkillAsset | null;
   workspaceFullName: string;
   initialTargets: string[];
-  onConfirm: (input: { targets: string[]; policy: UpdatePolicy; channel: Channel }) => void;
+  initialPolicy?: UpdatePolicy;
+  onConfirm: (input: { targets: string[]; policy: UpdatePolicy; channel: Channel; version?: string }) => void;
   pending: boolean;
 }) {
   const { t } = useLocale();
@@ -50,9 +50,9 @@ export function SubscribeModal({
       // Tools default to OFF; selecting none is allowed (downloads without
       // deploying to any tool).
       setSelected(normalizeTargets(initialTargets));
-      setPolicy("auto-patch");
+      setPolicy(initialPolicy);
     }
-  }, [open, initialTargets]);
+  }, [open, initialTargets, initialPolicy]);
 
   if (!asset) return null;
 
@@ -113,7 +113,7 @@ export function SubscribeModal({
                   {t("subscribe.updatePolicy")}
                 </div>
                 <div className="grid grid-cols-2 gap-2">
-                  {policies.map((p) => {
+                  {UPDATE_POLICIES.map((p) => {
                     const active = policy === p.id;
                     return (
                       <button
@@ -158,7 +158,14 @@ export function SubscribeModal({
                 {t("subscribe.cancel")}
               </Button>
               <Button
-                onPress={() => onConfirm({ targets: selected, policy, channel: "stable" })}
+                onPress={() =>
+                  onConfirm({
+                    targets: selected,
+                    policy,
+                    channel: "stable",
+                    version: policy === "pin" ? asset.manifest.version : undefined,
+                  })
+                }
                 isPending={pending}
               >
                 {t("subscribe.confirm")}

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use skill_library_core::{
     is_diagnostics_log_file, normalize_provider_id, redact_sensitive_diagnostics_text, AppPaths,
     AuthMode, GitHubCredential, ProviderCredential, ProviderCredentialMetadata, ProviderInstance,
-    ProviderKind, WorkspaceRef,
+    ProviderKind, UpdatePolicy, WorkspaceRef,
 };
 use skill_library_installer::{InstallMetadata, InstallOptions, InstallReport, TargetRoot};
 use skill_library_manifest::{effective_risk, SemanticChange, SkillAsset};
@@ -1198,6 +1198,7 @@ fn subscribe_workspace_skill(
     workspace: String,
     asset_id: String,
     version: Option<String>,
+    update: Option<UpdatePolicy>,
     targets: Vec<String>,
 ) -> CommandResult<SubscriptionsFile> {
     let paths = AppPaths::resolve()?;
@@ -1207,8 +1208,10 @@ fn subscribe_workspace_skill(
         workspace,
         asset_id,
         channel: "stable".to_owned(),
-        version,
-        update: skill_library_core::UpdatePolicy::Manual,
+        version: version
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty()),
+        update: update.unwrap_or_default(),
         targets: selection_from_targets(targets),
         subscribed_at: None,
     };

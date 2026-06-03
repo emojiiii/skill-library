@@ -4,7 +4,6 @@ import {
   BellPlus,
   ChevronDown,
   ChevronRight,
-  Download,
   Files,
   GitPullRequestArrow,
   Maximize2,
@@ -12,11 +11,9 @@ import {
   RefreshCw,
   RotateCcw,
   Share2,
-  ShieldAlert,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import {
-  installSkill,
   listProviderInstances,
   previewPublish,
   readSkillFile,
@@ -28,7 +25,7 @@ import { useLocale } from "../hooks/useLocale";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { providerSupportsComments, workspaceProviderId } from "../lib/providers";
 import { getFileContentFromCache, putFileContentInCache } from "../lib/workspaceCache";
-import { effectiveRisk, permissionSummary, riskRequiresConfirmation, riskTone } from "../utils/risk";
+import { effectiveRisk, riskTone } from "../utils/risk";
 import { CodeEditor } from "./CodeEditor";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { Pill } from "./Pill";
@@ -95,9 +92,6 @@ export function SkillDetail({
   setTargets,
   workspaceRef,
   onSubscribeClick,
-  onInstall,
-  onInstallClick,
-  onPublish,
   onPublishClick,
   onPublishDraftChange,
   canEditSource = true,
@@ -106,9 +100,6 @@ export function SkillDetail({
   hasLocalChanges = false,
   publishResetKey = 0,
   publishResetValue,
-  installPending,
-  publishPending,
-  installResult,
   publishResult,
   subscriptions,
 }: {
@@ -124,9 +115,6 @@ export function SkillDetail({
   setTargets: (targets: string[]) => void;
   workspaceRef: string;
   onSubscribeClick: () => void;
-  onInstall: (confirmed?: boolean) => void;
-  onInstallClick?: () => void;
-  onPublish: () => void;
   onPublishClick?: () => void;
   onPublishDraftChange?: (draft: SkillPublishDraft | null) => void;
   canEditSource?: boolean;
@@ -135,16 +123,12 @@ export function SkillDetail({
   hasLocalChanges?: boolean;
   publishResetKey?: number;
   publishResetValue?: string | null;
-  installPending: boolean;
-  publishPending: boolean;
-  installResult: Awaited<ReturnType<typeof installSkill>> | undefined;
   publishResult: Awaited<ReturnType<typeof previewPublish>> | undefined;
   subscriptions: number;
 }) {
   const { t } = useLocale();
   const activeAsset = detail?.asset ?? asset;
   const skillMarkdown = detail?.skill_markdown?.content;
-  const [pendingRiskAction, setPendingRiskAction] = useState<"install" | "publish" | null>(null);
   const [tab, setTab] = useLocalStorage<SkillTab>(`ws-ui:${workspaceRef}:tab`, "source");
   const [fullscreen, setFullscreen] = useState(false);
   const [fileTreeOpen, setFileTreeOpen] = useState(false);
@@ -163,7 +147,6 @@ export function SkillDetail({
 
   // Reset internal state when skill changes
   useEffect(() => {
-    setPendingRiskAction(null);
     setFullscreen(false);
     setFileTreeOpen(false);
   }, [asset.manifest.id]);
@@ -175,7 +158,6 @@ export function SkillDetail({
   }, [commentsSupported, setTab, tab]);
 
   const riskLevel = effectiveRisk(activeAsset.manifest);
-  const requiresConfirmation = riskRequiresConfirmation(riskLevel);
   const readOnlySource = !canEditSource;
 
   // Fetch selected file content (with filesystem persistent cache)
@@ -290,27 +272,6 @@ export function SkillDetail({
     setEditorResetVersion((value) => value + 1);
   }, []);
 
-  const startRiskAction = (action: "install" | "publish") => {
-    if (requiresConfirmation) {
-      setPendingRiskAction(action);
-      return;
-    }
-    if (action === "install") {
-      onInstall(false);
-    } else {
-      onPublish();
-    }
-  };
-
-  const confirmRiskAction = () => {
-    if (pendingRiskAction === "install") {
-      onInstall(true);
-    } else if (pendingRiskAction === "publish") {
-      onPublish();
-    }
-    setPendingRiskAction(null);
-  };
-
   void targets;
   void setTargets;
   void subscriptions;
@@ -391,18 +352,6 @@ export function SkillDetail({
               </Button>
               <Tooltip.Content>{t("skill.subscribe")}</Tooltip.Content>
             </Tooltip>
-            <Tooltip delay={0}>
-              <Button
-                isIconOnly
-                size="sm"
-                variant="secondary"
-                onPress={onInstallClick ?? (() => startRiskAction("install"))}
-                isPending={installPending}
-              >
-                <Download size={14} />
-              </Button>
-              <Tooltip.Content>{t("skill.install")}</Tooltip.Content>
-            </Tooltip>
             {onSyncClick ? (
               <Tooltip delay={0}>
                 <Button isIconOnly size="sm" variant="secondary" onPress={onSyncClick}>
@@ -414,28 +363,6 @@ export function SkillDetail({
           </div>
         </div>
 
-
-        {/* Risk confirmation banner */}
-        {pendingRiskAction ? (
-          <div className="mt-2.5 rounded-md border border-[var(--warning)] bg-[var(--warning-soft)] px-3 py-2">
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex min-w-0 items-center gap-2 text-[12px]">
-                <ShieldAlert className="shrink-0 text-[var(--warning)]" size={13} />
-                <span className="text-[var(--warning)]">
-                  {t("common.confirm")} {pendingRiskAction === "install" ? t("skill.riskConfirm.install") : t("skill.riskConfirm.publish")} · {t("sync.riskLabel").replace("{risk}", t(`risk.level.${riskLevel}`))} · {permissionSummary(activeAsset.manifest, t)}
-                </span>
-              </div>
-              <div className="flex shrink-0 gap-1.5">
-                <Button size="sm" variant="outline" onPress={() => setPendingRiskAction(null)}>
-                  {t("skill.cancel")}
-                </Button>
-                <Button size="sm" variant="secondary" onPress={confirmRiskAction} isPending={installPending || publishPending}>
-                  {t("skill.confirm")}
-                </Button>
-              </div>
-            </div>
-          </div>
-        ) : null}
       </div>
 
       {/* Tabs + content */}
@@ -603,7 +530,6 @@ export function SkillDetail({
                 </div>
               </div>
 
-              {installResult ? <ResultBlock title={t("skill.installReport")} value={installResult} /> : null}
               {publishResult ? <ResultBlock title={t("skill.publishPreview")} value={publishResult} /> : null}
             </div>
           ) : null}

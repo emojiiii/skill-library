@@ -59,7 +59,7 @@ enum Command {
     Subscribe {
         workspace: String,
         asset_id: String,
-        #[arg(long, default_value = "manual")]
+        #[arg(long, default_value = "auto-patch")]
         update: CliUpdatePolicy,
         #[arg(long)]
         version: Option<String>,
@@ -249,7 +249,6 @@ enum WorkspaceCommand {
 enum CliUpdatePolicy {
     AutoPatch,
     AutoMinor,
-    Manual,
     Pin,
 }
 
@@ -279,7 +278,6 @@ impl From<CliUpdatePolicy> for UpdatePolicy {
         match value {
             CliUpdatePolicy::AutoPatch => Self::AutoPatch,
             CliUpdatePolicy::AutoMinor => Self::AutoMinor,
-            CliUpdatePolicy::Manual => Self::Manual,
             CliUpdatePolicy::Pin => Self::Pin,
         }
     }

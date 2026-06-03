@@ -105,7 +105,15 @@ const zh: Record<string, string> = {
   "mySkills.checkUpdates": "检查更新",
   "mySkills.empty": "还没有添加技能",
   "mySkills.empty.desc": "去「发现」页找一个技能添加吧。",
-  "mySkills.autoUpdate": "自动保持最新",
+  "mySkills.autoUpdate": "监听更新",
+  "mySkills.updateSettings": "设置监听版本",
+  "mySkills.updateSettingsSave": "保存设置",
+  "mySkills.updateSettingsSaved": "监听设置已保存",
+  "mySkills.updateSettings.localOnly": "本地技能只在这台设备保存监听偏好。",
+  "mySkills.pinnedVersionLabel": "锁定版本",
+  "mySkills.trackingVersionLabel": "监听策略",
+  "mySkills.pinnedVersion": "锁定到 v{version}",
+  "mySkills.trackingLatest": "按所选策略处理后续版本",
   "mySkills.remove": "移除技能",
   "mySkills.removeTitle": "移除这个技能？",
   "mySkills.removeDesc": "会从本地技能库移除这条记录，并恢复或清理已安装到工具里的目标。",
@@ -335,13 +343,11 @@ const zh: Record<string, string> = {
   "subscribe.policy.autoPatch.desc": "1.4.x 更新自动安装",
   "subscribe.policy.autoMinor": "自动次版本",
   "subscribe.policy.autoMinor.desc": "1.x 更新自动安装",
-  "subscribe.policy.manual": "手动",
-  "subscribe.policy.manual.desc": "通知我，但由我触发更新",
   "subscribe.policy.pin": "锁定",
   "subscribe.policy.pin.desc": "锁定到当前版本",
   "subscribe.permissions": "安装时的权限",
   "subscribe.cancel": "取消",
-  "subscribe.confirm": "订阅",
+  "subscribe.confirm": "订阅并下载",
 
   // --- Publish Modal ---
   "publish.title": "发布",
@@ -633,7 +639,7 @@ const zh: Record<string, string> = {
 
   // --- Subscriptions Page (extra) ---
   "subscriptions.hint.synced": "从本地 subscriptions.yaml 同步",
-  "subscriptions.hint.manual": "手动 / 固定版本",
+  "subscriptions.hint.pinned": "固定版本",
   "subscriptions.entries": "{count} 条记录",
 
   // --- Rows ---
@@ -822,7 +828,15 @@ const en: Record<string, string> = {
   "mySkills.checkUpdates": "Check for updates",
   "mySkills.empty": "No skills added yet",
   "mySkills.empty.desc": "Head to Discover to find one.",
-  "mySkills.autoUpdate": "Keep up to date automatically",
+  "mySkills.autoUpdate": "Track updates",
+  "mySkills.updateSettings": "Configure update tracking",
+  "mySkills.updateSettingsSave": "Save settings",
+  "mySkills.updateSettingsSaved": "Tracking settings saved",
+  "mySkills.updateSettings.localOnly": "Local skills keep this tracking preference on this device.",
+  "mySkills.pinnedVersionLabel": "Pinned version",
+  "mySkills.trackingVersionLabel": "Tracking policy",
+  "mySkills.pinnedVersion": "Pinned to v{version}",
+  "mySkills.trackingLatest": "Use the selected policy for newer versions",
   "mySkills.remove": "Remove skill",
   "mySkills.removeTitle": "Remove this skill?",
   "mySkills.removeDesc": "This removes the skill from the local library and restores or cleans up installed tool targets.",
@@ -1052,13 +1066,11 @@ const en: Record<string, string> = {
   "subscribe.policy.autoPatch.desc": "1.4.x updates land automatically",
   "subscribe.policy.autoMinor": "Auto minor",
   "subscribe.policy.autoMinor.desc": "1.x updates land automatically",
-  "subscribe.policy.manual": "Manual",
-  "subscribe.policy.manual.desc": "Notify me, but I'll trigger updates",
   "subscribe.policy.pin": "Pin",
   "subscribe.policy.pin.desc": "Lock to the current version",
   "subscribe.permissions": "Permissions on install",
   "subscribe.cancel": "Cancel",
-  "subscribe.confirm": "Subscribe",
+  "subscribe.confirm": "Subscribe & download",
 
   // --- Publish Modal ---
   "publish.title": "Publish",
@@ -1351,7 +1363,7 @@ const en: Record<string, string> = {
 
   // --- Subscriptions Page (extra) ---
   "subscriptions.hint.synced": "Synced from local subscriptions.yaml",
-  "subscriptions.hint.manual": "Manual / pinned versions",
+  "subscriptions.hint.pinned": "Pinned versions",
   "subscriptions.entries": "{count} entries",
 
   // --- Rows ---

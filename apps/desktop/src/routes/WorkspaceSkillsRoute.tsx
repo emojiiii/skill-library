@@ -9,16 +9,17 @@ import { getSkillsListCache, setSkillsListCache, getSkillDetailFromCache, putSki
 import {
   dbCheckModifications,
   dbListSkills,
+  downloadSkillAsync,
   getSkillDetail,
   getRemoteReviewsBatch,
   getWorkspaceDetail,
-  installSkill,
   onScanProgress,
   publishWorkspaceSkillUpdate,
   readSubscriptions,
   scanRemoteWorkspaceStreaming,
   scanWorkspace,
   type SkillAsset,
+  type UpdatePolicy,
   subscribeWorkspaceSkill,
   type Workspace,
   type WorkspaceDetail,
@@ -28,8 +29,7 @@ import { normalizeRemoteReview, reviewVerdictMapKey, type ReviewVerdictMap } fro
 import { WorkspacesPage } from "../pages/WorkspacesPage";
 import { PublishModal } from "../widgets/PublishModal";
 import type { SkillPublishDraft } from "../widgets/SkillDetail";
-import { InstallToToolsDialog, type InstallTargetSelection } from "../widgets/InstallToToolsDialog";
-import { SubscribeModal, type Channel, type UpdatePolicy } from "../widgets/SubscribeModal";
+import { SubscribeModal, type Channel } from "../widgets/SubscribeModal";
 import { SyncSkillModal } from "../widgets/SyncSkillModal";
 import { useWorkspace } from "../context/WorkspaceContext";
 import { useAppStore } from "../state/appStore";
@@ -46,11 +46,6 @@ type ScanRequest = { kind: "local" | "remote"; value: string };
 
 const publishRoles = new Set(["admin", "maintain", "write"]);
 const EMPTY_ASSETS: SkillAsset[] = [];
-
-function resolveSelectedSource(workspace: string, selected: SkillAsset | null) {
-  if (!selected || workspace === "demo") return "demo";
-  return `${workspace.replace(/\/$/, "")}/${selected.path}`;
-}
 
 function scanResultWorkspaceKey(
   result: { workspace: Workspace | null | undefined },
@@ -89,7 +84,6 @@ export function WorkspaceSkillsRoute() {
   const [selectedFile, setSelectedFileRaw] = useState<string | null>(persistedFile);
   const [query, setQuery] = useState("");
   const [detailOpen, setDetailOpen] = useState(false);
-  const [installOpen, setInstallOpen] = useState(false);
   const [subscribeOpen, setSubscribeOpen] = useState(false);
   const [syncOpen, setSyncOpen] = useState(false);
   const [publishOpen, setPublishOpen] = useState(false);
@@ -288,34 +282,41 @@ export function WorkspaceSkillsRoute() {
 
   // --- Mutations ---
   const subscribe = useMutation({
-    mutationFn: (input: { targets: string[]; policy: UpdatePolicy; channel: Channel }) =>
-      subscribeWorkspaceSkill({
+    mutationFn: async (input: { targets: string[]; policy: UpdatePolicy; channel: Channel; version?: string }) => {
+      if (!selected) throw new Error("no skill selected");
+      const result = await subscribeWorkspaceSkill({
         workspace,
-        assetId: selected?.manifest.id ?? "",
-        version: selected?.manifest.version,
+        assetId: selected.manifest.id,
+        version: input.version,
+        update: input.policy,
         targets: input.targets,
-      }),
-    onSuccess: () => {
-      subscriptions.refetch();
-      setSubscribeOpen(false);
+      });
+      let downloadStarted = true;
+      try {
+        await downloadSkillAsync({
+          workspace,
+          assetId: selected.manifest.id,
+          skillPath: selected.path,
+          version: input.version,
+          name: selected.manifest.name,
+          description: selected.manifest.description,
+          targets: input.targets,
+        });
+      } catch (err) {
+        const code = (err as { code?: string })?.code;
+        if (code !== "already_installed" && code !== "already_downloading") throw err;
+        downloadStarted = false;
+      }
+      return { subscriptions: result, downloadStarted };
     },
-  });
-
-  const install = useMutation<
-    Awaited<ReturnType<typeof installSkill>>,
-    Error,
-    { selection?: InstallTargetSelection; confirmed?: boolean } | undefined
-  >({
-    mutationFn: (input) =>
-      installSkill(
-        resolveSelectedSource(workspace, selected),
-        input?.selection?.targets ?? targets,
-        input?.confirmed ?? false,
-        input?.selection?.projectTargets,
-      ),
-    onSuccess: () => {
-      setInstallOpen(false);
-      queryClient.invalidateQueries({ queryKey: ["local-agents"] });
+    onSuccess: (result) => {
+      subscriptions.refetch();
+      queryClient.invalidateQueries({ queryKey: ["db-skills"] });
+      setSubscribeOpen(false);
+      if (result.downloadStarted) toast.info(t("discover.downloadStarted"));
+    },
+    onError: (err) => {
+      toast.danger(formatError(err));
     },
   });
 
@@ -573,11 +574,6 @@ export function WorkspaceSkillsRoute() {
               setTargets={setTargets}
               workspaceRef={workspace}
               onSubscribeClick={() => setSubscribeOpen(true)}
-              onInstall={(confirmed = false) => install.mutate({ confirmed })}
-              onInstallClick={() => setInstallOpen(true)}
-              onPublish={() => {
-                if (canPublishToWorkspace) setPublishOpen(true);
-              }}
               onPublishClick={canPublishToWorkspace ? () => setPublishOpen(true) : undefined}
               onPublishDraftChange={setPublishDraft}
               canEditSource={canPublishToWorkspace}
@@ -591,10 +587,7 @@ export function WorkspaceSkillsRoute() {
                 queryClient.invalidateQueries({ queryKey: ["demo-skill-detail", selected?.path, selectedRef] });
                 queryClient.invalidateQueries({ queryKey: ["skill-file-content", workspace, selectedFile, selectedRef] });
               }}
-              installPending={install.isPending}
-              publishPending={publish.isPending}
               hasLocalChanges={selectedLocalSkill?.isModified ?? false}
-              installResult={install.data}
               publishResult={publish.data}
               subscriptions={subscriptions.data?.subscriptions.length ?? 0}
             />
@@ -602,21 +595,6 @@ export function WorkspaceSkillsRoute() {
           ) : null
         }
       />
-
-      <InstallToToolsDialog
-        open={installOpen}
-        onOpenChange={setInstallOpen}
-        manifest={selected?.manifest ?? null}
-        loading={false}
-        sourceLabel={workspace}
-        defaultTargets={targets}
-        pending={install.isPending}
-        onConfirm={(selection) => {
-          if (!selection.projectTargets.length) setTargets(selection.targets);
-          install.mutate({ selection, confirmed: true });
-        }}
-      />
-
       <SubscribeModal
         open={subscribeOpen}
         onOpenChange={setSubscribeOpen}

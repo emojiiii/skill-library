@@ -1,9 +1,15 @@
 import { useLocale } from "../hooks/useLocale";
-import type { Subscription } from "../lib/skill-library";
+import type { StoredUpdatePolicy, Subscription, UpdatePolicy } from "../lib/skill-library";
 import { formatRelativeTime } from "../utils/format";
 import { Card } from "../widgets/Card";
 import { MetricTile } from "../widgets/MetricTile";
 import { Pill } from "../widgets/Pill";
+
+function effectiveUpdatePolicy(update: StoredUpdatePolicy, version?: string): UpdatePolicy {
+  if (update === "manual") return "pin";
+  if (version && update !== "pin") return "pin";
+  return update;
+}
 
 export function SubscriptionsPage({
   subscriptions,
@@ -12,8 +18,8 @@ export function SubscriptionsPage({
 }) {
   const { t } = useLocale();
   const total = subscriptions.length;
-  const autoUpdating = subscriptions.filter((sub) => sub.update.startsWith("auto")).length;
-  const pinned = subscriptions.filter((sub) => sub.update === "pin").length;
+  const autoUpdating = subscriptions.filter((sub) => effectiveUpdatePolicy(sub.update, sub.version).startsWith("auto")).length;
+  const pinned = subscriptions.filter((sub) => effectiveUpdatePolicy(sub.update, sub.version) === "pin").length;
 
   return (
     <section className="scroll-area min-h-0 flex-1 px-6 py-6">
@@ -35,7 +41,7 @@ export function SubscriptionsPage({
             label={t("subscriptions.pinned")}
             value={pinned}
             tone={pinned ? "warning" : "default"}
-            hint={t("subscriptions.hint.manual")}
+            hint={t("subscriptions.hint.pinned")}
           />
         </div>
 
@@ -55,6 +61,7 @@ export function SubscriptionsPage({
           ) : (
             <div className="divide-y divide-[var(--line)]">
               {subscriptions.map((sub) => {
+                const updatePolicy = effectiveUpdatePolicy(sub.update, sub.version);
                 const targets: string[] = [];
                 if (sub.targets.claude_code) targets.push("claude-code");
                 if (sub.targets.cursor) targets.push("cursor");
@@ -78,10 +85,8 @@ export function SubscriptionsPage({
                       </div>
                     </div>
                     <div className="flex flex-col items-end gap-1">
-                      <Pill
-                        tone={sub.update === "pin" ? "warning" : sub.update === "manual" ? "default" : "success"}
-                      >
-                        {sub.update}
+                      <Pill tone={updatePolicy === "pin" ? "warning" : "success"}>
+                        {updatePolicy}
                       </Pill>
                       <Pill>{formatRelativeTime(sub.subscribed_at)}</Pill>
                     </div>

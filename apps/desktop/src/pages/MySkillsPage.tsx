@@ -1,6 +1,6 @@
 import { AlertDialog, Button, cn, Modal, ProgressBar, Spinner, Switch, Tooltip, toast } from "@heroui/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, ChevronDown, Download, ExternalLink, FolderOpen, FolderPlus, GitPullRequestArrow, Package, PackageOpen, RefreshCw, RotateCcw, ShieldAlert, ShieldCheck, Trash2 } from "lucide-react";
+import { AlertTriangle, ChevronDown, Download, ExternalLink, FolderOpen, FolderPlus, GitPullRequestArrow, Package, PackageOpen, RefreshCw, RotateCcw, Settings2, ShieldAlert, ShieldCheck, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   type AiReviewResult,
@@ -22,25 +22,33 @@ import {
   onSkillDownloadProgress,
   openLocalPath,
   type PathOpener,
+  readSubscriptions,
   reviewLocalSkill,
   selectProjectDirectory,
   selectSkillDirectory,
+  subscribeWorkspaceSkill,
   syncNow,
+  type StoredUpdatePolicy,
+  type Subscription,
+  type UpdatePolicy,
   type UnmanagedSkillInfo,
 } from "../lib/skill-library";
 import { openExternalUrl } from "../utils/format";
+import { normalizeProviderId } from "../lib/providers";
 import { useLocale } from "../hooks/useLocale";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { useTheme } from "../hooks/useTheme";
 import { useAppStore } from "../state/appStore";
 import { Card } from "../widgets/Card";
 import { Pill, type PillTone } from "../widgets/Pill";
+import { UPDATE_POLICIES } from "../widgets/SubscribeModal";
 
 const TOOL_LABELS: Record<string, string> = {
   "claude-code": "Claude Code",
   codex: "Codex",
 };
 const INSTALL_TARGET_IDS = new Set(Object.keys(TOOL_LABELS));
+const DEFAULT_TRACKING_POLICY: UpdatePolicy = "auto-patch";
 
 /** AI review verdict → Pill tone. */
 const VERDICT_TONE: Record<string, PillTone> = {
@@ -56,7 +64,56 @@ const SEVERITY_TONE: Record<string, PillTone> = {
   danger: "danger",
 };
 
+const POLICY_TONE: Record<UpdatePolicy, PillTone> = {
+  "auto-patch": "success",
+  "auto-minor": "success",
+  pin: "warning",
+};
+
 const EMPTY_IMPORT_GROUPS: Record<string, boolean> = {};
+
+function isRemoteSourceWorkspace(sourceWorkspace: string) {
+  const value = sourceWorkspace.trim();
+  return Boolean(value && value !== "local" && value.includes("/"));
+}
+
+function subscriptionWorkspaceLabel(subscription: Subscription) {
+  return `${subscription.workspace.owner}/${subscription.workspace.repo}`;
+}
+
+function subscriptionWorkspaceKey(subscription: Subscription) {
+  return `${normalizeProviderId(subscription.workspace.provider)}/${subscriptionWorkspaceLabel(subscription)}`;
+}
+
+function subscriptionMatchesSkill(skill: ManagedSkill, subscription: Subscription) {
+  const source = skill.sourceWorkspace.trim().replace(/\/$/, "");
+  return (
+    subscription.asset_id === skill.id &&
+    (source === subscriptionWorkspaceLabel(subscription) || source === subscriptionWorkspaceKey(subscription))
+  );
+}
+
+function targetsFromSubscription(subscription: Subscription) {
+  const targets: string[] = [];
+  if (subscription.targets.claude_code) targets.push("claude-code");
+  if (subscription.targets.cursor) targets.push("cursor");
+  if (subscription.targets.codex) targets.push("codex");
+  targets.push(...subscription.targets.custom);
+  return targets;
+}
+
+function targetsFromSkill(skill: ManagedSkill) {
+  return skill.targets
+    .filter((target) => target.enabled && INSTALL_TARGET_IDS.has(target.runtime))
+    .map((target) => target.runtime);
+}
+
+function normalizeUpdatePolicy(policy: StoredUpdatePolicy | undefined, version?: string | null): UpdatePolicy | undefined {
+  if (!policy) return undefined;
+  if (policy === "manual") return "pin";
+  if (version && policy !== "pin") return "pin";
+  return policy;
+}
 
 /**
  * "My skills" — the single home for skills installed on this machine. Merges
@@ -98,6 +155,7 @@ export function MySkillsPage() {
   const skills = useQuery({ queryKey: ["db-skills"], queryFn: dbListSkills, staleTime: 30 * 1000 });
   const runtimes = useQuery({ queryKey: ["db-runtimes"], queryFn: dbListRuntimes, staleTime: 5 * 60 * 1000 });
   const pathOpeners = useQuery({ queryKey: ["path-openers"], queryFn: listPathOpeners, staleTime: 10 * 60 * 1000 });
+  const subscriptions = useQuery({ queryKey: ["subscriptions"], queryFn: readSubscriptions, staleTime: 60 * 1000 });
   const unmanaged = useQuery({
     queryKey: ["db-unmanaged"],
     queryFn: dbScanUnmanaged,
@@ -180,6 +238,27 @@ export function MySkillsPage() {
   const update = useMutation({
     mutationFn: () => syncNow(true),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["db-skills"] }),
+  });
+  const saveUpdatePolicy = useMutation({
+    mutationFn: (input: {
+      skill: ManagedSkill;
+      subscription?: Subscription;
+      policy: UpdatePolicy;
+      version?: string;
+    }) =>
+      subscribeWorkspaceSkill({
+        workspace: input.skill.sourceWorkspace,
+        assetId: input.skill.id,
+        version: input.version,
+        update: input.policy,
+        targets: input.subscription ? targetsFromSubscription(input.subscription) : targetsFromSkill(input.skill),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["subscriptions"] });
+      queryClient.invalidateQueries({ queryKey: ["db-skills"] });
+      toast.info(t("mySkills.updateSettingsSaved"));
+    },
+    onError: (err) => toast.danger(String((err as { message?: string })?.message ?? err)),
   });
   const importSkill = useMutation({
     mutationFn: (a: {
@@ -689,50 +768,65 @@ export function MySkillsPage() {
           </div>
         ) : (
           <div className="space-y-3">
-            {list.map((skill) => (
-              <SkillCard
-                key={skill.id}
-                skill={skill}
-                tools={tools.map((r) => r.id)}
-                busyRuntimeKey={busyRuntimeKey}
-                onToggle={(runtime, enabled) =>
-                  enabled
-                    ? disable.mutate({ skillId: skill.id, runtime })
-                    : enable.mutate({ skillId: skill.id, runtime })
-                }
-                busyProjectDeploymentId={busyProjectDeploymentId}
-                deletingProjectDeploymentId={
-                  deleteProjectDeployment.isPending ? (deleteProjectDeployment.variables ?? null) : null
-                }
-                onToggleProjectDeployment={(deploymentId, enabled) =>
-                  toggleProjectDeployment.mutate({ deploymentId, enabled })
-                }
-                onDeleteProjectDeployment={(deploymentId) => deleteProjectDeployment.mutate(deploymentId)}
-                onAddProjectInstall={() => openProjectInstallDialog(skill)}
-                onRemove={() => remove.mutate(skill.id)}
-                removing={remove.isPending && remove.variables === skill.id}
-                onRetry={() => retry.mutate(skill)}
-                retrying={retry.isPending && retry.variables?.id === skill.id}
-                onReview={() => review.mutate(skill.id)}
-                reviewing={review.isPending && review.variables === skill.id}
-                aiConfigured={aiConfigured}
-                onPush={() => {
-                  setPushEntry({
-                    id: skill.id,
-                    name: skill.name,
-                    path: skill.localPath,
-                    hasManifest: true,
-                    hasSkillMd: true,
-                    managed: true,
-                    version: skill.version || null,
-                    description: skill.description || null,
-                  });
-                  setPushPreview(null);
-                  setPushOpen(true);
-                }}
-                pathOpeners={pathOpeners.data ?? []}
-              />
-            ))}
+            {list.map((skill) => {
+              const subscription = subscriptions.data?.subscriptions.find((sub) => subscriptionMatchesSkill(skill, sub));
+              const savingPolicy =
+                saveUpdatePolicy.isPending && saveUpdatePolicy.variables?.skill.id === skill.id;
+              return (
+                <SkillCard
+                  key={skill.id}
+                  skill={skill}
+                  subscription={subscription}
+                  tools={tools.map((r) => r.id)}
+                  busyRuntimeKey={busyRuntimeKey}
+                  onToggle={(runtime, enabled) =>
+                    enabled
+                      ? disable.mutate({ skillId: skill.id, runtime })
+                      : enable.mutate({ skillId: skill.id, runtime })
+                  }
+                  busyProjectDeploymentId={busyProjectDeploymentId}
+                  deletingProjectDeploymentId={
+                    deleteProjectDeployment.isPending ? (deleteProjectDeployment.variables ?? null) : null
+                  }
+                  onToggleProjectDeployment={(deploymentId, enabled) =>
+                    toggleProjectDeployment.mutate({ deploymentId, enabled })
+                  }
+                  onDeleteProjectDeployment={(deploymentId) => deleteProjectDeployment.mutate(deploymentId)}
+                  onAddProjectInstall={() => openProjectInstallDialog(skill)}
+                  onSaveUpdatePolicy={(policy, version) =>
+                    saveUpdatePolicy.mutate({
+                      skill,
+                      subscription,
+                      policy,
+                      version,
+                    })
+                  }
+                  savingUpdatePolicy={savingPolicy}
+                  onRemove={() => remove.mutate(skill.id)}
+                  removing={remove.isPending && remove.variables === skill.id}
+                  onRetry={() => retry.mutate(skill)}
+                  retrying={retry.isPending && retry.variables?.id === skill.id}
+                  onReview={() => review.mutate(skill.id)}
+                  reviewing={review.isPending && review.variables === skill.id}
+                  aiConfigured={aiConfigured}
+                  onPush={() => {
+                    setPushEntry({
+                      id: skill.id,
+                      name: skill.name,
+                      path: skill.localPath,
+                      hasManifest: true,
+                      hasSkillMd: true,
+                      managed: true,
+                      version: skill.version || null,
+                      description: skill.description || null,
+                    });
+                    setPushPreview(null);
+                    setPushOpen(true);
+                  }}
+                  pathOpeners={pathOpeners.data ?? []}
+                />
+              );
+            })}
           </div>
         )}
       </div>
@@ -877,6 +971,108 @@ function PathOpenButton({ path, openers }: { path: string; openers: PathOpener[]
   );
 }
 
+function SkillUpdatePolicyModal({
+  open,
+  onOpenChange,
+  skill,
+  policy,
+  remoteUpdatable,
+  pending,
+  onConfirm,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  skill: ManagedSkill;
+  policy: UpdatePolicy;
+  remoteUpdatable: boolean;
+  pending: boolean;
+  onConfirm: (policy: UpdatePolicy) => void;
+}) {
+  const { t } = useLocale();
+  const [draftPolicy, setDraftPolicy] = useState<UpdatePolicy>(policy);
+
+  useEffect(() => {
+    if (open) setDraftPolicy(policy);
+  }, [open, policy]);
+
+  return (
+    <Modal isOpen={open} onOpenChange={onOpenChange}>
+      <Modal.Backdrop>
+        <Modal.Container size="md">
+          <Modal.Dialog className="rounded-[12px] bg-[var(--bg-elevated)] outline-none">
+            <Modal.CloseTrigger />
+            <Modal.Header className="border-b border-[var(--line)] px-5 py-4">
+              <Modal.Heading className="text-[15px] font-semibold tracking-tight">
+                {t("mySkills.updateSettings")}
+              </Modal.Heading>
+              <div className="mt-1 flex min-w-0 items-center gap-2 text-[12px] text-[var(--fg-muted)]">
+                <span className="truncate">{skill.name}</span>
+                {skill.version ? <Pill mono>v{skill.version}</Pill> : null}
+              </div>
+            </Modal.Header>
+
+            <Modal.Body className="space-y-4 px-5 py-4">
+              {!remoteUpdatable ? (
+                <div className="rounded-md border border-[var(--line)] bg-[var(--bg-soft)] px-3 py-2 text-[12px] text-[var(--fg-muted)]">
+                  {t("mySkills.updateSettings.localOnly")}
+                </div>
+              ) : null}
+
+              <section>
+                <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-[var(--fg-muted)]">
+                  {t("subscribe.updatePolicy")}
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  {UPDATE_POLICIES.map((item) => {
+                    const active = draftPolicy === item.id;
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => setDraftPolicy(item.id)}
+                        className={`rounded-md border px-3 py-2 text-left transition-colors ${
+                          active
+                            ? "border-[var(--brand)] bg-[var(--brand-soft)]"
+                            : "border-[var(--line)] bg-[var(--bg-elevated)] hover:bg-[var(--bg-soft)]"
+                        }`}
+                      >
+                        <div className={`text-[12.5px] font-medium ${active ? "text-[var(--brand-fg)]" : "text-[var(--fg)]"}`}>
+                          {t(item.labelKey)}
+                        </div>
+                        <div className="mt-0.5 text-[11px] text-[var(--fg-muted)]">{t(item.descKey)}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </section>
+
+              <div className="rounded-md border border-[var(--line)] bg-[var(--bg-soft)] px-3 py-2.5">
+                <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--fg-muted)]">
+                  {draftPolicy === "pin" ? t("mySkills.pinnedVersionLabel") : t("mySkills.trackingVersionLabel")}
+                </div>
+                <div className="mt-1 text-[12.5px] text-[var(--fg-secondary)]">
+                  {draftPolicy === "pin"
+                    ? t("mySkills.pinnedVersion").replace("{version}", skill.version || "0.0.0")
+                    : t("mySkills.trackingLatest")}
+                </div>
+              </div>
+            </Modal.Body>
+
+            <div className="flex justify-end gap-2 border-t border-[var(--line)] px-5 py-3">
+              <Button variant="outline" onPress={() => onOpenChange(false)}>
+                {t("common.cancel")}
+              </Button>
+              <Button onPress={() => onConfirm(draftPolicy)} isPending={pending}>
+                {t("mySkills.updateSettingsSave")}
+              </Button>
+            </div>
+          </Modal.Dialog>
+        </Modal.Container>
+      </Modal.Backdrop>
+    </Modal>
+  );
+}
+
 function ProjectDeploymentRow({
   deployment,
   pathOpeners,
@@ -987,6 +1183,7 @@ function ProjectDeploymentRow({
 
 function SkillCard({
   skill,
+  subscription,
   tools,
   busyRuntimeKey,
   onToggle,
@@ -995,6 +1192,8 @@ function SkillCard({
   onToggleProjectDeployment,
   onDeleteProjectDeployment,
   onAddProjectInstall,
+  onSaveUpdatePolicy,
+  savingUpdatePolicy,
   onRemove,
   removing,
   onRetry,
@@ -1006,6 +1205,7 @@ function SkillCard({
   pathOpeners,
 }: {
   skill: ManagedSkill;
+  subscription?: Subscription;
   tools: string[];
   busyRuntimeKey: string | null;
   onToggle: (runtime: string, currentlyEnabled: boolean) => void;
@@ -1014,6 +1214,8 @@ function SkillCard({
   onToggleProjectDeployment: (deploymentId: number, enabled: boolean) => void;
   onDeleteProjectDeployment: (deploymentId: number) => void;
   onAddProjectInstall: () => void;
+  onSaveUpdatePolicy: (policy: UpdatePolicy, version?: string) => void;
+  savingUpdatePolicy: boolean;
   onRemove: () => void;
   removing: boolean;
   onRetry: () => void;
@@ -1026,12 +1228,32 @@ function SkillCard({
 }) {
   const { t } = useLocale();
   const [showFindings, setShowFindings] = useState(false);
-  const [autoUpdate, setAutoUpdate] = useLocalStorage<boolean>(`my-skills:auto:${skill.id}`, true);
+  const [policyModalOpen, setPolicyModalOpen] = useState(false);
+  const [localPolicy, setLocalPolicy] = useLocalStorage<UpdatePolicy>(
+    `my-skills:update-policy:${skill.id}`,
+    DEFAULT_TRACKING_POLICY,
+  );
 
   const isDownloading = skill.installStatus === "downloading";
   const isError = skill.installStatus === "error";
   const hasReview = skill.reviewVerdict !== "";
   const projectDeployments = skill.projectDeployments ?? [];
+  const remoteUpdatable = isRemoteSourceWorkspace(skill.sourceWorkspace);
+  const subscriptionPolicy = normalizeUpdatePolicy(subscription?.update, subscription?.version);
+  const updatePolicy = subscriptionPolicy ?? normalizeUpdatePolicy(localPolicy as StoredUpdatePolicy) ?? DEFAULT_TRACKING_POLICY;
+  const autoUpdate = updatePolicy !== "pin";
+  const policyLabel = t(UPDATE_POLICIES.find((policy) => policy.id === updatePolicy)?.labelKey ?? "subscribe.policy.autoPatch");
+
+  const savePolicy = (policy: UpdatePolicy) => {
+    setLocalPolicy(policy);
+    if (remoteUpdatable) {
+      onSaveUpdatePolicy(policy, policy === "pin" ? skill.version || undefined : undefined);
+    }
+  };
+
+  const toggleAutoUpdate = (selected: boolean) => {
+    savePolicy(selected ? (updatePolicy === "pin" ? DEFAULT_TRACKING_POLICY : updatePolicy) : "pin");
+  };
 
   return (
     <Card className="p-4">
@@ -1307,13 +1529,50 @@ function SkillCard({
 
           {/* Auto-update */}
           <div className="mt-3 flex items-center justify-between border-t border-[var(--line)] pt-3">
-            <span className="text-[12.5px] text-[var(--fg-secondary)]">{t("mySkills.autoUpdate")}</span>
-            <Switch isSelected={autoUpdate} onChange={(v) => setAutoUpdate(v)}>
-              <Switch.Control>
-                <Switch.Thumb />
-              </Switch.Control>
-            </Switch>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="text-[12.5px] text-[var(--fg-secondary)]">{t("mySkills.autoUpdate")}</span>
+                <Pill tone={POLICY_TONE[updatePolicy]}>{policyLabel}</Pill>
+              </div>
+              {updatePolicy === "pin" && skill.version ? (
+                <div className="mt-1 font-mono text-[11px] text-[var(--fg-muted)]">
+                  {t("mySkills.pinnedVersion").replace("{version}", skill.version)}
+                </div>
+              ) : null}
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <Tooltip delay={150}>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8 px-2 text-[var(--fg-secondary)] hover:text-[var(--brand)]"
+                  onPress={() => setPolicyModalOpen(true)}
+                  isDisabled={savingUpdatePolicy}
+                  aria-label={t("mySkills.updateSettings")}
+                >
+                  <Settings2 size={14} />
+                </Button>
+                <Tooltip.Content>{t("mySkills.updateSettings")}</Tooltip.Content>
+              </Tooltip>
+              <Switch isSelected={autoUpdate} isDisabled={savingUpdatePolicy} onChange={toggleAutoUpdate}>
+                <Switch.Control>
+                  <Switch.Thumb />
+                </Switch.Control>
+              </Switch>
+            </div>
           </div>
+          <SkillUpdatePolicyModal
+            open={policyModalOpen}
+            onOpenChange={setPolicyModalOpen}
+            skill={skill}
+            policy={updatePolicy}
+            remoteUpdatable={remoteUpdatable}
+            pending={savingUpdatePolicy}
+            onConfirm={(policy) => {
+              savePolicy(policy);
+              setPolicyModalOpen(false);
+            }}
+          />
         </>
       )}
     </Card>

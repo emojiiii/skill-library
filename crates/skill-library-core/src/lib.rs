@@ -85,7 +85,7 @@ pub enum UpdatePolicy {
 
 impl Default for UpdatePolicy {
     fn default() -> Self {
-        Self::Manual
+        Self::AutoPatch
     }
 }
 

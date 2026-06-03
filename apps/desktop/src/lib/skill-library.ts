@@ -180,6 +180,9 @@ export interface WorkspaceMember {
   avatar_url?: string | null;
 }
 
+export type UpdatePolicy = "auto-patch" | "auto-minor" | "pin";
+export type StoredUpdatePolicy = UpdatePolicy | "manual";
+
 export interface Subscription {
   workspace: {
     provider: string;
@@ -189,7 +192,7 @@ export interface Subscription {
   asset_id: string;
   channel: string;
   version?: string;
-  update: "auto-patch" | "auto-minor" | "manual" | "pin";
+  update: StoredUpdatePolicy;
   targets: {
     claude_code: boolean;
     cursor: boolean;
@@ -871,6 +874,7 @@ export async function subscribeWorkspaceSkill(args: {
   workspace: string;
   assetId: string;
   version?: string;
+  update?: UpdatePolicy;
   targets: string[];
 }): Promise<SubscriptionsFile> {
   if (!isTauri) return desktopOnly("Subscribe");

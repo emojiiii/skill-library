@@ -84,7 +84,7 @@ impl Database {
                     branch TEXT DEFAULT '',
                     channel TEXT DEFAULT 'stable',
                     version TEXT DEFAULT '',
-                    update_policy TEXT DEFAULT 'manual',
+                    update_policy TEXT DEFAULT 'auto-patch',
                     subscribed_at TEXT NOT NULL
                 );
 

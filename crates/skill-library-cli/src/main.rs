@@ -2,7 +2,8 @@ use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use skill_library_core::{
-    AppPaths, GitHubCredential, RiskLevel, SkillLibraryConfig, UpdatePolicy, WorkspaceRef,
+    normalize_provider_id, AppPaths, AuthMode, ProviderCredential, ProviderCredentialMetadata,
+    ProviderInstance, ProviderKind, RiskLevel, SkillLibraryConfig, UpdatePolicy, WorkspaceRef,
 };
 use skill_library_installer::{InstallOptions, TargetRoot};
 use skill_library_manifest::SkillManifest;
@@ -214,6 +215,11 @@ enum LoginCommand {
         #[arg(long, env = "GITHUB_CLIENT_ID")]
         client_id: Option<String>,
     },
+    Provider {
+        provider_id: String,
+        #[arg(long)]
+        token: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -378,6 +384,11 @@ fn cli_error_json(error: &anyhow::Error) -> String {
 fn cli_error_code(error: &anyhow::Error) -> &'static str {
     if error.is::<skill_library_provider::ProviderError>() {
         "provider_error"
+    } else if matches!(
+        error.downcast_ref::<skill_library_sync::SyncError>(),
+        Some(skill_library_sync::SyncError::ProviderUnsupported(_))
+    ) {
+        "provider_unsupported"
     } else if error.is::<skill_library_sync::SyncError>() {
         "sync_error"
     } else if error.is::<skill_library_installer::InstallerError>() {
@@ -406,35 +417,45 @@ async fn run_command(command: Command, paths: &AppPaths) -> anyhow::Result<()> {
                     Some(token) => token,
                     None => login_github_device_flow(client_id).await?,
                 };
-                let provider = GitHubProvider::new(token.clone())?;
-                let info = provider.validate_token().await?;
-                skill_library_core::save_github_credential(
-                    &paths.credentials,
-                    GitHubCredential {
-                        token,
-                        login: Some(info.user.login.clone()),
-                        scopes: info.scopes.clone(),
-                    },
-                )?;
-                println!("logged in to github as {}", info.user.login);
+                let login = login_provider_token_cli(paths, "github.com", token).await?;
+                println!("logged in to github as {login}");
+            }
+            LoginCommand::Provider { provider_id, token } => {
+                skill_library_sync::ensure_local_state(&paths)?;
+                let login = login_provider_token_cli(paths, &provider_id, token).await?;
+                println!(
+                    "logged in to {} as {}",
+                    normalize_provider_id(&provider_id),
+                    login
+                );
             }
         },
         Command::Auth { command } => {
             skill_library_sync::ensure_local_state(&paths)?;
             match command {
                 AuthCommand::Status => {
-                    let status = skill_library_core::load_github_credential(&paths.credentials)?
-                        .and_then(|github| github.login)
-                        .map(|login| format!("github: logged in as {login}"))
-                        .unwrap_or_else(|| "github: not logged in".to_owned());
-                    println!("{status}");
+                    let credentials = skill_library_core::read_credentials(&paths.credentials)?;
+                    for instance in configured_provider_instances(&paths) {
+                        let status = skill_library_core::load_provider_credential(
+                            &paths.credentials,
+                            &instance.id,
+                        )?
+                        .and_then(|credential| credential.metadata.login)
+                        .or_else(|| {
+                            credentials
+                                .providers
+                                .get(&instance.id)
+                                .and_then(|metadata| metadata.login.clone())
+                        })
+                        .map(|login| format!("{}: logged in as {login}", instance.id))
+                        .unwrap_or_else(|| format!("{}: not logged in", instance.id));
+                        println!("{status}");
+                    }
                 }
                 AuthCommand::Logout { provider } => {
-                    if provider != "github" {
-                        anyhow::bail!("unsupported provider `{provider}`");
-                    }
-                    skill_library_core::delete_github_credential(&paths.credentials)?;
-                    println!("logged out from github");
+                    let provider = normalize_provider_id(&provider);
+                    skill_library_core::delete_provider_credential(&paths.credentials, &provider)?;
+                    println!("logged out from {provider}");
                 }
             }
         }
@@ -449,19 +470,31 @@ async fn run_command(command: Command, paths: &AppPaths) -> anyhow::Result<()> {
                     webhook_events,
                 } => {
                     let workspace = parse_workspace(&workspace)?;
-                    let token = token.or_else(|| saved_github_token(&paths));
                     let webhook = workspace_webhook_registration(
                         webhook_url,
                         webhook_secret,
                         webhook_events,
                     )?;
-                    let stored = skill_library_sync::add_github_workspace_with_webhook(
-                        &paths.workspace_registry,
-                        &workspace,
-                        token.as_deref(),
-                        webhook,
-                    )
-                    .await?;
+                    let stored = if webhook.is_some() {
+                        ensure_github_cli_capability(paths, &workspace, "webhooks")?;
+                        let token = token.or_else(|| saved_github_token(&paths));
+                        skill_library_sync::add_github_workspace_with_webhook(
+                            &paths.workspace_registry,
+                            &workspace,
+                            token.as_deref(),
+                            webhook,
+                        )
+                        .await?
+                    } else {
+                        let credential = cli_provider_credential(paths, &workspace, token)?;
+                        skill_library_sync::add_remote_workspace_with_instances(
+                            &paths.workspace_registry,
+                            &workspace,
+                            credential.as_ref(),
+                            configured_provider_instances(&paths),
+                        )
+                        .await?
+                    };
                     println!("{}", serde_json::to_string_pretty(&stored)?);
                 }
                 WorkspaceCommand::List => {
@@ -477,10 +510,13 @@ async fn run_command(command: Command, paths: &AppPaths) -> anyhow::Result<()> {
         }
         Command::ScanRemote { workspace, token } => {
             let workspace = parse_workspace(&workspace)?;
-            let token = token.or_else(|| saved_github_token(&paths));
-            let result =
-                skill_library_sync::scan_github_workspace_skills(&workspace, token.as_deref())
-                    .await?;
+            let credential = cli_provider_credential(paths, &workspace, token)?;
+            let result = skill_library_sync::scan_remote_workspace_skills_with_instances(
+                &workspace,
+                credential.as_ref(),
+                configured_provider_instances(&paths),
+            )
+            .await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Command::Subscribe {
@@ -638,24 +674,31 @@ async fn run_command(command: Command, paths: &AppPaths) -> anyhow::Result<()> {
             token,
         } => {
             let workspace = parse_workspace(&workspace)?;
-            let token = token.or_else(|| saved_github_token(&paths));
-            let provider = github_provider(token.as_deref())?;
-            let tags = provider
-                .list_tags(
-                    &workspace,
-                    PageOpts {
-                        cursor: None,
-                        per_page: Some(100),
-                    },
-                )
-                .await?;
+            let token = token.or_else(|| {
+                (workspace.normalized_provider() == "github.com")
+                    .then(|| saved_github_token(&paths))
+                    .flatten()
+            });
+            let credential = cli_provider_credential(paths, &workspace, token)?;
+            let instances = configured_provider_instances(&paths);
+            let tags = skill_library_sync::list_remote_tags_with_instances(
+                &workspace,
+                credential.as_ref(),
+                instances.clone(),
+                PageOpts {
+                    cursor: None,
+                    per_page: Some(100),
+                },
+            )
+            .await?;
             let detail = match skill {
                 Some(skill_path) => Some(
-                    skill_library_sync::read_github_skill_detail(
+                    skill_library_sync::read_remote_skill_detail_with_instances(
                         &workspace,
                         &skill_path,
                         None,
-                        token.as_deref(),
+                        credential.as_ref(),
+                        instances,
                     )
                     .await?,
                 ),
@@ -678,29 +721,37 @@ async fn run_command(command: Command, paths: &AppPaths) -> anyhow::Result<()> {
             token,
         } => {
             let workspace = parse_workspace(&workspace)?;
-            let token = token.or_else(|| saved_github_token(&paths));
-            let provider = github_provider(token.as_deref())?;
-            let comparison = provider
-                .compare_refs(
-                    &workspace,
-                    &GitRef::Tag(from.clone()),
-                    &GitRef::Tag(to.clone()),
-                )
-                .await?;
+            let token = token.or_else(|| {
+                (workspace.normalized_provider() == "github.com")
+                    .then(|| saved_github_token(&paths))
+                    .flatten()
+            });
+            let credential = cli_provider_credential(paths, &workspace, token)?;
+            let instances = configured_provider_instances(&paths);
+            let comparison = skill_library_sync::compare_remote_refs_with_instances(
+                &workspace,
+                credential.as_ref(),
+                instances.clone(),
+                &GitRef::Tag(from.clone()),
+                &GitRef::Tag(to.clone()),
+            )
+            .await?;
             let semantic = match skill_path {
                 Some(skill_path) => {
-                    let from_detail = skill_library_sync::read_github_skill_detail(
+                    let from_detail = skill_library_sync::read_remote_skill_detail_with_instances(
                         &workspace,
                         &skill_path,
                         Some(&from),
-                        token.as_deref(),
+                        credential.as_ref(),
+                        instances.clone(),
                     )
                     .await?;
-                    let to_detail = skill_library_sync::read_github_skill_detail(
+                    let to_detail = skill_library_sync::read_remote_skill_detail_with_instances(
                         &workspace,
                         &skill_path,
                         Some(&to),
-                        token.as_deref(),
+                        credential.as_ref(),
+                        instances,
                     )
                     .await?;
                     skill_library_manifest::semantic_diff(
@@ -767,6 +818,7 @@ async fn run_command(command: Command, paths: &AppPaths) -> anyhow::Result<()> {
             skill_library_sync::ensure_local_state(&paths)?;
             let api = api.unwrap_or_else(|| read_config_or_default(&paths).api_base_url);
             let workspace = parse_workspace(&workspace)?;
+            ensure_github_cli_capability(paths, &workspace, "invitations")?;
             let role_value: PermissionLevel = role.into();
             let token = token
                 .or_else(|| saved_github_token(&paths))
@@ -864,8 +916,9 @@ async fn run_command(command: Command, paths: &AppPaths) -> anyhow::Result<()> {
                 let request =
                     skill_library_publish::build_publish_request(&package, &workspace, &user);
                 if publish_pr {
+                    ensure_github_cli_capability(paths, &workspace, "change requests")?;
                     confirm_manifest_risk(
-                        "publish PR",
+                        "publish change request",
                         &package.manifest,
                         package.risk_level,
                         yes,
@@ -1009,14 +1062,70 @@ async fn run_command(command: Command, paths: &AppPaths) -> anyhow::Result<()> {
 }
 
 fn parse_workspace(value: &str) -> anyhow::Result<WorkspaceRef> {
-    let value = value
+    let parts = value
         .trim()
-        .strip_prefix("github.com/")
-        .unwrap_or_else(|| value.trim());
-    let Some((owner, repo)) = value.split_once('/') else {
-        anyhow::bail!("workspace must look like owner/repo or github.com/owner/repo");
-    };
-    Ok(WorkspaceRef::github(owner, repo))
+        .trim_matches('/')
+        .split('/')
+        .filter(|part| !part.trim().is_empty())
+        .collect::<Vec<_>>();
+    match parts.as_slice() {
+        [owner, repo] => Ok(WorkspaceRef::github(*owner, *repo)),
+        [provider, namespace @ .., repo] if !namespace.is_empty() => Ok(WorkspaceRef {
+            provider: normalize_provider_id(provider),
+            owner: namespace.join("/"),
+            repo: (*repo).to_owned(),
+            remote_id: None,
+        }),
+        _ => anyhow::bail!("workspace must look like owner/repo or provider/namespace/repo"),
+    }
+}
+
+fn configured_provider_instance_for_workspace(
+    paths: &AppPaths,
+    workspace: &WorkspaceRef,
+) -> anyhow::Result<ProviderInstance> {
+    let provider_id = workspace.normalized_provider();
+    configured_provider_instances(paths)
+        .into_iter()
+        .find(|instance| normalize_provider_id(&instance.id) == provider_id && instance.enabled)
+        .ok_or_else(|| anyhow::anyhow!("provider `{provider_id}` is not configured"))
+}
+
+fn cli_provider_label(instance: &ProviderInstance) -> String {
+    if instance.display_name.trim().is_empty() {
+        instance.id.clone()
+    } else {
+        format!("{} ({})", instance.display_name, instance.id)
+    }
+}
+
+fn unsupported_cli_capability_message(instance: &ProviderInstance, capability: &str) -> String {
+    let provider = cli_provider_label(instance);
+    match &instance.kind {
+        ProviderKind::WebDav if capability == "change requests" => format!(
+            "{provider} is a WebDAV source and does not support reviewed ChangeRequest publishing; direct upload requires explicit confirmation and is not implemented yet"
+        ),
+        ProviderKind::GitLab | ProviderKind::Gitee if capability == "change requests" => {
+            format!("{provider} change request publishing is not implemented yet")
+        }
+        _ => format!("{provider} does not support {capability} in this build"),
+    }
+}
+
+fn ensure_github_cli_capability(
+    paths: &AppPaths,
+    workspace: &WorkspaceRef,
+    capability: &str,
+) -> anyhow::Result<()> {
+    let instance = configured_provider_instance_for_workspace(paths, workspace)?;
+    if matches!(&instance.kind, ProviderKind::GitHub) {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "{}",
+            unsupported_cli_capability_message(&instance, capability)
+        )
+    }
 }
 
 fn saved_github_token(paths: &AppPaths) -> Option<String> {
@@ -1026,11 +1135,82 @@ fn saved_github_token(paths: &AppPaths) -> Option<String> {
         .map(|github| github.token)
 }
 
-fn github_provider(token: Option<&str>) -> anyhow::Result<GitHubProvider> {
-    match token {
-        Some(token) if !token.trim().is_empty() => Ok(GitHubProvider::new(token.to_owned())?),
-        _ => Ok(GitHubProvider::anonymous("https://api.github.com")?),
+fn cli_provider_credential(
+    paths: &AppPaths,
+    workspace: &WorkspaceRef,
+    token: Option<String>,
+) -> anyhow::Result<Option<ProviderCredential>> {
+    if let Some(token) = token.filter(|token| !token.trim().is_empty()) {
+        return Ok(Some(ProviderCredential {
+            metadata: ProviderCredentialMetadata {
+                provider: workspace.normalized_provider(),
+                login: None,
+                scopes: Vec::new(),
+                auth_mode: AuthMode::PersonalAccessToken,
+            },
+            token,
+        }));
     }
+    Ok(skill_library_core::load_provider_credential(
+        &paths.credentials,
+        &workspace.normalized_provider(),
+    )?)
+}
+
+async fn login_provider_token_cli(
+    paths: &AppPaths,
+    provider_id: &str,
+    token: String,
+) -> anyhow::Result<String> {
+    let provider_id = normalize_provider_id(provider_id);
+    let token = token.trim().to_owned();
+    if token.is_empty() {
+        anyhow::bail!("provider token is required");
+    }
+    let instance = configured_provider_instances(paths)
+        .into_iter()
+        .find(|instance| instance.id == provider_id)
+        .ok_or_else(|| anyhow::anyhow!("provider `{provider_id}` is not configured"))?;
+    if provider_id != "github.com" {
+        skill_library_core::save_provider_credential(
+            &paths.credentials,
+            ProviderCredential {
+                metadata: ProviderCredentialMetadata {
+                    provider: provider_id,
+                    login: None,
+                    scopes: Vec::new(),
+                    auth_mode: instance
+                        .auth_modes
+                        .first()
+                        .cloned()
+                        .unwrap_or(AuthMode::PersonalAccessToken),
+                },
+                token,
+            },
+        )?;
+        return Ok(instance.display_name);
+    }
+    let provider = GitHubProvider::new(token.clone())?;
+    let info = provider.validate_token().await?;
+    skill_library_core::save_provider_credential(
+        &paths.credentials,
+        ProviderCredential {
+            metadata: ProviderCredentialMetadata {
+                provider: provider_id,
+                login: Some(info.user.login.clone()),
+                scopes: info.scopes,
+                auth_mode: AuthMode::PersonalAccessToken,
+            },
+            token,
+        },
+    )?;
+    Ok(info.user.login)
+}
+
+fn configured_provider_instances(paths: &AppPaths) -> Vec<skill_library_core::ProviderInstance> {
+    skill_library_core::read_config(&paths.config)
+        .map(|config| skill_library_core::configured_provider_instances(&config))
+        .unwrap_or_else(|_| skill_library_core::default_provider_instances())
 }
 
 async fn fetch_notifications(
@@ -1694,7 +1874,7 @@ fn parse_target_roots(values: Vec<String>) -> anyhow::Result<Vec<TargetRoot>> {
 mod tests {
     use super::{
         cli_error_code, cli_error_json, cli_log_path, friendly_api_error, redact_sensitive_text,
-        Command, DaemonPollReport, NotificationsResponse,
+        unsupported_cli_capability_message, Command, DaemonPollReport, NotificationsResponse,
     };
 
     #[test]
@@ -1783,6 +1963,33 @@ mod tests {
         let error = anyhow::Error::from(skill_library_core::SkillLibraryError::user("no home"));
 
         assert_eq!(cli_error_code(&error), "core_error");
+    }
+
+    #[test]
+    fn cli_error_code_maps_provider_unsupported() {
+        let error = anyhow::Error::from(skill_library_sync::SyncError::ProviderUnsupported(
+            "webdav-company".to_owned(),
+        ));
+
+        assert_eq!(cli_error_code(&error), "provider_unsupported");
+    }
+
+    #[test]
+    fn webdav_change_request_message_requires_direct_upload_confirmation() {
+        let instance = skill_library_core::ProviderInstance {
+            id: "webdav-company".to_owned(),
+            kind: skill_library_core::ProviderKind::WebDav,
+            display_name: "Company WebDAV".to_owned(),
+            web_base_url: "https://dav.example.test/skills".to_owned(),
+            api_base_url: "https://dav.example.test/skills".to_owned(),
+            auth_modes: vec![skill_library_core::AuthMode::Basic],
+            enabled: true,
+        };
+
+        let message = unsupported_cli_capability_message(&instance, "change requests");
+
+        assert!(message.contains("WebDAV source"));
+        assert!(message.contains("direct upload requires explicit confirmation"));
     }
 
     #[test]

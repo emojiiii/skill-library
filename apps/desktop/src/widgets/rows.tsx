@@ -1,3 +1,4 @@
+import { ListBox, Select } from "@heroui/react";
 import type {
   InvitationRecord,
   NotificationEvent,
@@ -112,17 +113,32 @@ export function MemberRow({ member, onChangeRole }: { member: WorkspaceMember; o
         </div>
       </div>
       {onChangeRole ? (
-        <select
+        <Select
           value={member.role}
-          onChange={(e) => onChangeRole(member.login, e.target.value)}
-          className="settings-select text-[11.5px]"
+          onChange={(value) => {
+            if (typeof value === "string" || typeof value === "number") {
+              onChangeRole(member.login, String(value));
+            }
+          }}
+          variant="secondary"
+          className="w-[112px]"
+          aria-label={t("rows.memberRole")}
         >
-          <option value="read">read</option>
-          <option value="triage">triage</option>
-          <option value="write">write</option>
-          <option value="maintain">maintain</option>
-          <option value="admin">admin</option>
-        </select>
+          <Select.Trigger>
+            <Select.Value />
+            <Select.Indicator />
+          </Select.Trigger>
+          <Select.Popover>
+            <ListBox>
+              {["read", "triage", "write", "maintain", "admin"].map((role) => (
+                <ListBox.Item key={role} id={role} textValue={role}>
+                  {role}
+                  <ListBox.ItemIndicator />
+                </ListBox.Item>
+              ))}
+            </ListBox>
+          </Select.Popover>
+        </Select>
       ) : (
         <Pill
           tone={["admin", "maintain"].includes(member.role) ? "success" : member.role === "none" ? "warning" : "default"}

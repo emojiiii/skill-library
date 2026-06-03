@@ -60,9 +60,9 @@ export function Sidebar({
   onOpenAccount,
   isCreatorMode,
 }: {
-  current: { full_name: string; visibility?: string; permission?: string } | null;
+  current: { provider?: string; full_name: string; visibility?: string; permission?: string } | null;
   saved: StoredWorkspace[];
-  onSelectWorkspace: (workspace: { full_name: string }) => void;
+  onSelectWorkspace: (workspace: StoredWorkspace) => void;
   onOpenAddDialog: () => void;
   counts: Partial<Record<AppPage, number>>;
   authLogin: string | null | undefined;
@@ -81,7 +81,20 @@ export function Sidebar({
       {/* Traffic light spacer for macOS overlay titlebar — draggable */}
       <div className="sidebar-traffic-light-spacer" data-tauri-drag-region />
 
-      {/* Workspace picker is a creator-layer concept; anonymous users see a brand header instead. */}
+      <div className="sidebar-brand">
+        <img
+          src={appIconUrl}
+          alt=""
+          draggable={false}
+          className="sidebar-brand__icon"
+        />
+        {!collapsed ? (
+          <span className="sidebar-brand__name">
+            {t("login.title")}
+          </span>
+        ) : null}
+      </div>
+
       {isCreatorMode ? (
         !collapsed ? (
           <WorkspacePicker
@@ -97,21 +110,7 @@ export function Sidebar({
             </span>
           </div>
         )
-      ) : (
-        <div className="flex items-center gap-2.5 px-3 py-3.5">
-          <img
-            src={appIconUrl}
-            alt=""
-            draggable={false}
-            className="size-8 shrink-0 rounded-lg"
-          />
-          {!collapsed ? (
-            <span className="text-[13.5px] font-semibold tracking-tight text-[var(--fg)]">
-              {t("login.title")}
-            </span>
-          ) : null}
-        </div>
-      )}
+      ) : null}
 
       <div className="sidebar-scroll">
         {visibleGroups.map((group) => (
@@ -161,10 +160,10 @@ export function Sidebar({
           {!collapsed ? (
             <span className="min-w-0 flex-1">
               <span className="block truncate text-[12.5px] font-medium text-[var(--fg)]">
-                {authLogin ? `@${authLogin}` : t("sidebar.signInToContribute")}
+                {authLogin ? authLogin : t("sidebar.signInToContribute")}
               </span>
               <span className="block truncate text-[11px] text-[var(--fg-muted)]">
-                {authLogin ? t("sidebar.githubConnected") : t("sidebar.signInToContribute.desc")}
+                {authLogin ? t("sidebar.accountConnected") : t("sidebar.signInToContribute.desc")}
               </span>
             </span>
           ) : null}

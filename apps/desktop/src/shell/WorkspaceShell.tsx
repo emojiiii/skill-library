@@ -7,6 +7,7 @@ import { getAuthStatus, listWorkspaces } from "../lib/skill-library";
 import { WorkspaceProvider, type WorkspaceContextValue } from "../context/WorkspaceContext";
 import { useAppStore } from "../state/appStore";
 import { useLocale } from "../hooks/useLocale";
+import { workspaceKey, workspaceMatchesSelection } from "../lib/providers";
 
 /**
  * Workspace layout route component (pathless layout route).
@@ -29,13 +30,14 @@ export function WorkspaceShell() {
   const auth = useQuery({ queryKey: ["auth-status"], queryFn: getAuthStatus });
 
   const workspaceMeta = useMemo(
-    () => workspaces.data?.workspaces.find((w) => w.full_name === workspace) ?? null,
+    () => workspaces.data?.workspaces.find((w) => workspaceMatchesSelection(w, workspace)) ?? null,
     [workspaces.data?.workspaces, workspace],
   );
+  const workspaceRef = workspaceMeta ? workspaceKey(workspaceMeta) : workspace ?? "";
 
   const ctx: WorkspaceContextValue = useMemo(
-    () => ({ workspace: workspace ?? "", workspaceMeta, authLogin: auth.data?.githubLogin }),
-    [workspace, workspaceMeta, auth.data?.githubLogin],
+    () => ({ workspace: workspaceRef, workspaceMeta, authLogin: auth.data?.githubLogin }),
+    [workspaceRef, workspaceMeta, auth.data?.githubLogin],
   );
 
   if (!workspace) {
@@ -63,7 +65,7 @@ export function WorkspaceShell() {
 
   return (
     <WorkspaceProvider value={ctx}>
-      <Outlet key={workspace} />
+      <Outlet key={workspaceRef} />
     </WorkspaceProvider>
   );
 }

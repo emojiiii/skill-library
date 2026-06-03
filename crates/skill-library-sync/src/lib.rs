@@ -1,19 +1,24 @@
 use chrono::{DateTime, Utc};
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use skill_library_core::{AppPaths, RiskLevel, UpdatePolicy, WorkspaceRef};
+use skill_library_core::{
+    AppPaths, AuthMode, ProviderCredential, ProviderCredentialMetadata, ProviderInstance,
+    RiskLevel, UpdatePolicy, WorkspaceRef,
+};
 use skill_library_installer::{InstallOptions, InstallReport, TargetRoot};
 use skill_library_manifest::{effective_risk, SkillAsset};
-use skill_library_provider::{PageOpts, Provider, ProviderError, WebhookConfig, Workspace};
-use skill_library_provider_github::{
-    scan::{
-        read_skill_detail, scan_skill_assets_streaming, scan_workspace_detail,
-        scan_workspace_skills, SkillDetailScan, WorkspaceDetailScan,
-    },
-    GitHubProvider,
+use skill_library_provider::{
+    GitRef, GitRepositoryProvider, Page, PageOpts, Provider, ProviderError, RefComparison,
+    SkillSourceProvider, SourceRef, Tag, WebhookConfig, Workspace,
 };
+use skill_library_provider_github::GitHubProvider;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+mod provider_factory;
+mod remote_scan;
+
+pub use remote_scan::{SkillDetailScan, WorkspaceDetailScan};
 
 pub type Result<T> = std::result::Result<T, SyncError>;
 
@@ -31,12 +36,16 @@ pub enum SyncError {
     Manifest(#[from] skill_library_manifest::ManifestError),
     #[error("installer error: {0}")]
     Installer(#[from] skill_library_installer::InstallerError),
+    #[error("core error: {0}")]
+    Core(#[from] skill_library_core::SkillLibraryError),
     #[error("invalid skill source: {0}")]
     InvalidSource(String),
     #[error("subscription not found: {0}")]
     NotFound(String),
     #[error("remote resource not found: {0}")]
     RemoteNotFound(String),
+    #[error("provider is not supported yet: {0}")]
+    ProviderUnsupported(String),
     #[error(
         "risk confirmation required for {asset_id}: {risk_level} risk permissions [{permissions}]"
     )]
@@ -300,6 +309,7 @@ impl StoredWorkspace {
             provider: self.provider.clone(),
             owner: self.owner.clone(),
             repo: self.repo.clone(),
+            remote_id: None,
         }
     }
 }
@@ -519,35 +529,56 @@ pub async fn scan_github_workspace_skills(
     workspace: &WorkspaceRef,
     token: Option<&str>,
 ) -> Result<RemoteWorkspaceSkills> {
-    if workspace.provider != "github" {
-        return Err(SyncError::NotFound(format!(
-            "provider {} is not supported",
-            workspace.provider
-        )));
-    }
-    let provider = match token {
-        Some(token) if !token.trim().is_empty() => {
-            GitHubProvider::new(token.to_owned()).map_err(|err| {
-                SyncError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    err.to_string(),
-                ))
-            })?
-        }
-        _ => GitHubProvider::anonymous("https://api.github.com").map_err(|err| {
-            SyncError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                err.to_string(),
-            ))
-        })?,
+    let credential = credential_from_token(workspace, token);
+    scan_remote_workspace_skills(workspace, credential.as_ref()).await
+}
+
+pub async fn scan_remote_workspace_skills(
+    workspace: &WorkspaceRef,
+    credential: Option<&ProviderCredential>,
+) -> Result<RemoteWorkspaceSkills> {
+    let handles = provider_factory::ProviderFactory::default().build(workspace, credential)?;
+    scan_remote_workspace_skills_with_handles(workspace, handles).await
+}
+
+pub async fn scan_remote_workspace_skills_with_instances(
+    workspace: &WorkspaceRef,
+    credential: Option<&ProviderCredential>,
+    instances: impl IntoIterator<Item = ProviderInstance>,
+) -> Result<RemoteWorkspaceSkills> {
+    let handles = provider_factory::ProviderFactory::new(instances).build(workspace, credential)?;
+    scan_remote_workspace_skills_with_handles(workspace, handles).await
+}
+
+pub async fn list_remote_workspaces_with_instances(
+    provider_id: &str,
+    credential: Option<&ProviderCredential>,
+    instances: impl IntoIterator<Item = ProviderInstance>,
+    opts: PageOpts,
+) -> Result<Page<Workspace>> {
+    let workspace = WorkspaceRef {
+        provider: provider_id.to_owned(),
+        owner: String::new(),
+        repo: String::new(),
+        remote_id: None,
     };
-    let scan = scan_workspace_skills(&provider, workspace)
+    let handles =
+        provider_factory::ProviderFactory::new(instances).build(&workspace, credential)?;
+    handles
+        .source
+        .list_sources(opts)
         .await
-        .map_err(sync_provider_error)?;
-    Ok(RemoteWorkspaceSkills {
-        workspace: scan.workspace,
-        skills: scan.skills,
-    })
+        .map_err(provider_error_to_sync_error)
+}
+
+async fn scan_remote_workspace_skills_with_handles(
+    workspace: &WorkspaceRef,
+    handles: provider_factory::ProviderHandles,
+) -> Result<RemoteWorkspaceSkills> {
+    let catalog = handles
+        .catalog
+        .ok_or_else(|| SyncError::ProviderUnsupported(workspace.normalized_provider()))?;
+    catalog.scan_workspace_skills(workspace).await
 }
 
 /// Streaming variant: calls `on_batch` after each batch of skills is parsed,
@@ -555,37 +586,77 @@ pub async fn scan_github_workspace_skills(
 pub async fn scan_github_workspace_skills_streaming(
     workspace: &WorkspaceRef,
     token: Option<&str>,
-    on_batch: impl FnMut(&[SkillAsset]),
+    on_batch: impl FnMut(&[SkillAsset]) + Send,
 ) -> Result<RemoteWorkspaceSkills> {
-    if workspace.provider != "github" {
-        return Err(SyncError::NotFound(format!(
-            "provider {} is not supported",
-            workspace.provider
-        )));
-    }
-    let provider = github_provider(workspace, token)?;
-    let ws = provider
-        .get_workspace(workspace)
+    let credential = credential_from_token(workspace, token);
+    scan_remote_workspace_skills_streaming(workspace, credential.as_ref(), on_batch).await
+}
+
+pub async fn scan_remote_workspace_skills_streaming(
+    workspace: &WorkspaceRef,
+    credential: Option<&ProviderCredential>,
+    mut on_batch: impl FnMut(&[SkillAsset]) + Send,
+) -> Result<RemoteWorkspaceSkills> {
+    let handles = provider_factory::ProviderFactory::default().build(workspace, credential)?;
+    scan_remote_workspace_skills_streaming_with_handles(workspace, handles, &mut on_batch).await
+}
+
+pub async fn scan_remote_workspace_skills_streaming_with_instances(
+    workspace: &WorkspaceRef,
+    credential: Option<&ProviderCredential>,
+    instances: impl IntoIterator<Item = ProviderInstance>,
+    mut on_batch: impl FnMut(&[SkillAsset]) + Send,
+) -> Result<RemoteWorkspaceSkills> {
+    let handles = provider_factory::ProviderFactory::new(instances).build(workspace, credential)?;
+    scan_remote_workspace_skills_streaming_with_handles(workspace, handles, &mut on_batch).await
+}
+
+async fn scan_remote_workspace_skills_streaming_with_handles(
+    workspace: &WorkspaceRef,
+    handles: provider_factory::ProviderHandles,
+    on_batch: &mut (dyn for<'a> FnMut(&'a [SkillAsset]) + Send),
+) -> Result<RemoteWorkspaceSkills> {
+    let catalog = handles
+        .catalog
+        .ok_or_else(|| SyncError::ProviderUnsupported(workspace.normalized_provider()))?;
+    catalog
+        .scan_workspace_skills_streaming(workspace, on_batch)
         .await
-        .map_err(sync_provider_error)?;
-    let branch = skill_library_provider::GitRef::Branch(ws.default_branch.clone());
-    let skills = scan_skill_assets_streaming(&provider, workspace, &branch, on_batch)
-        .await
-        .map_err(sync_provider_error)?;
-    Ok(RemoteWorkspaceSkills {
-        workspace: ws,
-        skills,
-    })
 }
 
 pub async fn scan_github_workspace_detail(
     workspace: &WorkspaceRef,
     token: Option<&str>,
 ) -> Result<WorkspaceDetailScan> {
-    let provider = github_provider(workspace, token)?;
-    scan_workspace_detail(&provider, workspace)
-        .await
-        .map_err(sync_provider_error)
+    let credential = credential_from_token(workspace, token);
+    scan_remote_workspace_detail(workspace, credential.as_ref()).await
+}
+
+pub async fn scan_remote_workspace_detail(
+    workspace: &WorkspaceRef,
+    credential: Option<&ProviderCredential>,
+) -> Result<WorkspaceDetailScan> {
+    let handles = provider_factory::ProviderFactory::default().build(workspace, credential)?;
+    scan_remote_workspace_detail_with_handles(workspace, handles).await
+}
+
+pub async fn scan_remote_workspace_detail_with_instances(
+    workspace: &WorkspaceRef,
+    credential: Option<&ProviderCredential>,
+    instances: impl IntoIterator<Item = ProviderInstance>,
+) -> Result<WorkspaceDetailScan> {
+    let handles = provider_factory::ProviderFactory::new(instances).build(workspace, credential)?;
+    scan_remote_workspace_detail_with_handles(workspace, handles).await
+}
+
+async fn scan_remote_workspace_detail_with_handles(
+    workspace: &WorkspaceRef,
+    handles: provider_factory::ProviderHandles,
+) -> Result<WorkspaceDetailScan> {
+    let catalog = handles
+        .catalog
+        .ok_or_else(|| SyncError::ProviderUnsupported(workspace.normalized_provider()))?;
+    catalog.scan_workspace_detail(workspace).await
 }
 
 pub async fn read_github_skill_detail(
@@ -594,10 +665,82 @@ pub async fn read_github_skill_detail(
     ref_name: Option<&str>,
     token: Option<&str>,
 ) -> Result<SkillDetailScan> {
-    let provider = github_provider(workspace, token)?;
-    read_skill_detail(&provider, workspace, skill_path, ref_name)
+    let credential = credential_from_token(workspace, token);
+    read_remote_skill_detail(workspace, skill_path, ref_name, credential.as_ref()).await
+}
+
+pub async fn read_remote_skill_detail(
+    workspace: &WorkspaceRef,
+    skill_path: &str,
+    ref_name: Option<&str>,
+    credential: Option<&ProviderCredential>,
+) -> Result<SkillDetailScan> {
+    let handles = provider_factory::ProviderFactory::default().build(workspace, credential)?;
+    read_remote_skill_detail_with_handles(workspace, skill_path, ref_name, handles).await
+}
+
+pub async fn read_remote_skill_detail_with_instances(
+    workspace: &WorkspaceRef,
+    skill_path: &str,
+    ref_name: Option<&str>,
+    credential: Option<&ProviderCredential>,
+    instances: impl IntoIterator<Item = ProviderInstance>,
+) -> Result<SkillDetailScan> {
+    let handles = provider_factory::ProviderFactory::new(instances).build(workspace, credential)?;
+    read_remote_skill_detail_with_handles(workspace, skill_path, ref_name, handles).await
+}
+
+async fn read_remote_skill_detail_with_handles(
+    workspace: &WorkspaceRef,
+    skill_path: &str,
+    ref_name: Option<&str>,
+    handles: provider_factory::ProviderHandles,
+) -> Result<SkillDetailScan> {
+    let catalog = handles
+        .catalog
+        .ok_or_else(|| SyncError::ProviderUnsupported(workspace.normalized_provider()))?;
+    catalog
+        .read_skill_detail(workspace, skill_path, ref_name)
         .await
-        .map_err(sync_provider_error)
+}
+
+pub async fn list_remote_tags_with_instances(
+    workspace: &WorkspaceRef,
+    credential: Option<&ProviderCredential>,
+    instances: impl IntoIterator<Item = ProviderInstance>,
+    opts: PageOpts,
+) -> Result<Page<Tag>> {
+    let handles = provider_factory::ProviderFactory::new(instances).build(workspace, credential)?;
+    let git = handles
+        .git
+        .ok_or_else(|| SyncError::ProviderUnsupported(workspace.normalized_provider()))?;
+    git.list_tags(workspace, opts)
+        .await
+        .map_err(provider_error_to_sync_error)
+}
+
+pub async fn compare_remote_refs_with_instances(
+    workspace: &WorkspaceRef,
+    credential: Option<&ProviderCredential>,
+    instances: impl IntoIterator<Item = ProviderInstance>,
+    base: &GitRef,
+    head: &GitRef,
+) -> Result<RefComparison> {
+    let handles = provider_factory::ProviderFactory::new(instances).build(workspace, credential)?;
+    let git = handles
+        .git
+        .ok_or_else(|| SyncError::ProviderUnsupported(workspace.normalized_provider()))?;
+    git.compare_refs(workspace, base, head)
+        .await
+        .map_err(provider_error_to_sync_error)
+}
+
+fn provider_error_to_sync_error(err: ProviderError) -> SyncError {
+    let message = err.to_string();
+    match err {
+        ProviderError::NotFound { .. } => SyncError::RemoteNotFound(message),
+        _ => SyncError::Io(std::io::Error::new(std::io::ErrorKind::Other, message)),
+    }
 }
 
 pub async fn add_github_workspace(
@@ -606,6 +749,19 @@ pub async fn add_github_workspace(
     token: Option<&str>,
 ) -> Result<StoredWorkspace> {
     add_github_workspace_with_webhook(registry_path, workspace, token, None).await
+}
+
+pub async fn add_remote_workspace_with_instances(
+    registry_path: impl AsRef<Path>,
+    workspace: &WorkspaceRef,
+    credential: Option<&ProviderCredential>,
+    instances: impl IntoIterator<Item = ProviderInstance>,
+) -> Result<StoredWorkspace> {
+    let scan =
+        scan_remote_workspace_skills_with_instances(workspace, credential, instances).await?;
+    let stored = StoredWorkspace::from(scan.workspace);
+    upsert_workspace(registry_path, stored.clone())?;
+    Ok(stored)
 }
 
 pub async fn add_github_workspace_with_webhook(
@@ -769,8 +925,13 @@ async fn sync_subscription(
     let latest = match &subscription.version {
         Some(version) => version.clone(),
         None => {
-            latest_version_for_subscription(&subscription.workspace, &subscription.asset_id, token)
-                .await?
+            latest_version_for_subscription(
+                paths,
+                &subscription.workspace,
+                &subscription.asset_id,
+                token,
+            )
+            .await?
         }
     };
     let decision = decide_update(
@@ -879,43 +1040,59 @@ fn ensure_risk_allowed(source_dir: &Path, asset_id: &str, allow_risky: bool) -> 
 }
 
 async fn latest_version_for_subscription(
+    paths: &AppPaths,
     workspace: &WorkspaceRef,
     asset_id: &str,
     token: Option<&str>,
 ) -> Result<String> {
-    let provider = github_provider(workspace, token)?;
-    let tags = provider
-        .list_tags(
-            workspace,
-            PageOpts {
-                cursor: None,
-                per_page: Some(100),
-            },
-        )
-        .await
-        .map_err(sync_provider_error)?;
-    let best = tags
-        .items
-        .into_iter()
-        .filter_map(|tag| {
-            let version = tag.name.trim_start_matches('v');
-            Version::parse(version)
-                .ok()
-                .map(|version| (version, tag.name))
-        })
-        .max_by(|(left, _), (right, _)| left.cmp(right));
-    match best {
-        Some((version, _tag)) => Ok(version.to_string()),
-        None => {
-            let detail = scan_github_workspace_detail(workspace, token).await?;
-            detail
-                .skills
-                .into_iter()
-                .find(|asset| skill_asset_matches(asset, asset_id))
-                .map(|asset| asset.manifest.version)
-                .ok_or_else(|| SyncError::NotFound(asset_id.to_owned()))
+    let credential = credential_from_token(workspace, token);
+    let handles = provider_factory::ProviderFactory::from_config_path(&paths.config)?
+        .build(workspace, credential.as_ref())?;
+    if let Some(git) = handles.git.as_ref() {
+        let tags = git
+            .list_tags(
+                workspace,
+                PageOpts {
+                    cursor: None,
+                    per_page: Some(100),
+                },
+            )
+            .await
+            .map_err(sync_provider_error)?;
+        let best = tags
+            .items
+            .into_iter()
+            .filter_map(|tag| {
+                let version = tag.name.trim_start_matches('v');
+                Version::parse(version)
+                    .ok()
+                    .map(|version| (version, tag.name))
+            })
+            .max_by(|(left, _), (right, _)| left.cmp(right));
+        if let Some((version, _tag)) = best {
+            return Ok(version.to_string());
         }
     }
+    let detail = scan_remote_workspace_detail(workspace, credential.as_ref()).await?;
+    let best_index_version = detail
+        .versions
+        .iter()
+        .filter_map(|version| {
+            Version::parse(version.name.trim_start_matches('v'))
+                .ok()
+                .map(|parsed| (parsed, version.name.clone()))
+        })
+        .max_by(|(left, _), (right, _)| left.cmp(right))
+        .map(|(version, _)| version.to_string());
+    if let Some(version) = best_index_version {
+        return Ok(version);
+    }
+    detail
+        .skills
+        .into_iter()
+        .find(|asset| skill_asset_matches(asset, asset_id))
+        .map(|asset| asset.manifest.version)
+        .ok_or_else(|| SyncError::NotFound(asset_id.to_owned()))
 }
 
 struct DownloadedSkillSource {
@@ -933,7 +1110,7 @@ struct DownloadedSkillSource {
 /// no tag matches we fall back to the repo's default branch (e.g. `main`).
 /// A matching tag is preferred when present (reproducible historical installs).
 async fn resolve_download_ref(
-    provider: &GitHubProvider,
+    provider: &dyn GitRepositoryProvider,
     workspace: &WorkspaceRef,
     version: &str,
 ) -> Result<String> {
@@ -956,7 +1133,7 @@ async fn resolve_download_ref(
         return Ok(tag.name);
     }
     let ws = provider
-        .get_workspace(workspace)
+        .get_source(workspace)
         .await
         .map_err(sync_provider_error)?;
     Ok(ws.default_branch)
@@ -976,8 +1153,28 @@ fn fallback_download_refs(version: &str) -> Vec<String> {
     refs
 }
 
+fn non_git_ref_candidates(version: &str) -> Vec<String> {
+    let version = version.trim();
+    let mut refs = Vec::new();
+    if !version.is_empty() && version != "latest" {
+        refs.push(version.to_owned());
+    }
+    refs.push("latest".to_owned());
+    refs.dedup();
+    refs
+}
+
+fn source_ref_for_file_source(ref_name: &str) -> SourceRef {
+    let ref_name = ref_name.trim();
+    if ref_name.is_empty() || ref_name == "latest" {
+        SourceRef::Latest
+    } else {
+        SourceRef::Version(ref_name.to_owned())
+    }
+}
+
 async fn download_ref_candidates(
-    provider: &GitHubProvider,
+    provider: &dyn GitRepositoryProvider,
     workspace: &WorkspaceRef,
     version: &str,
     allow_api_resolution: bool,
@@ -1002,29 +1199,46 @@ async fn download_skill_source(
     version: &str,
     token: Option<&str>,
 ) -> Result<DownloadedSkillSource> {
-    let provider = github_provider(workspace, token)?;
-    let git_refs = download_ref_candidates(
-        &provider,
-        workspace,
-        version,
-        token.is_some_and(|token| !token.trim().is_empty()),
-    )
-    .await?;
+    let credential = credential_from_token(workspace, token);
+    let handles = provider_factory::ProviderFactory::from_config_path(&paths.config)?
+        .build(workspace, credential.as_ref())?;
+    let refs = if let Some(git) = handles.git.as_ref() {
+        download_ref_candidates(
+            git.as_ref(),
+            workspace,
+            version,
+            token.is_some_and(|token| !token.trim().is_empty()),
+        )
+        .await?
+    } else {
+        non_git_ref_candidates(version)
+    };
     let mut last_error: Option<SyncError> = None;
 
-    for git_ref in git_refs {
+    for ref_name in refs {
         let cache_dir = paths
             .workspaces
             .join(workspace.storage_key())
             .join("cache")
-            .join(safe_filename(&git_ref));
+            .join(safe_filename(&ref_name));
         if cache_dir.exists() {
             fs::remove_dir_all(&cache_dir)?;
         }
         fs::create_dir_all(&cache_dir)?;
-        match provider
-            .download_tarball(workspace, &git_ref, &cache_dir)
-            .await
+        let mut progress = |_: u64, _: Option<u64>| {};
+        let at = if handles.git.is_some() {
+            SourceRef::Git(GitRef::Sha(ref_name.clone()))
+        } else {
+            source_ref_for_file_source(&ref_name)
+        };
+        match SkillSourceProvider::download_snapshot(
+            handles.source.as_ref(),
+            workspace,
+            &at,
+            &cache_dir,
+            &mut progress,
+        )
+        .await
         {
             Ok(archive) => {
                 let assets = skill_library_manifest::scan_workspace(&archive.extracted_root)?;
@@ -1034,8 +1248,8 @@ async fn download_skill_source(
                     .ok_or_else(|| SyncError::NotFound(asset_id.to_owned()))?;
                 return Ok(DownloadedSkillSource {
                     source_dir: archive.extracted_root.join(asset.path),
-                    source_hash: Some(format!("sha256:{}", archive.sha256)),
-                    ref_name: git_ref,
+                    source_hash: archive.sha256.map(|sha256| format!("sha256:{sha256}")),
+                    ref_name: archive.ref_name,
                 });
             }
             Err(err) => last_error = Some(sync_provider_error(err)),
@@ -1083,31 +1297,48 @@ pub async fn download_skill_for_install<F>(
     mut on_progress: F,
 ) -> Result<PreparedSkillDownload>
 where
-    F: FnMut(u64, Option<u64>),
+    F: FnMut(u64, Option<u64>) + Send,
 {
-    let provider = github_provider(workspace, token)?;
-    let git_refs = download_ref_candidates(
-        &provider,
-        workspace,
-        version,
-        token.is_some_and(|token| !token.trim().is_empty()),
-    )
-    .await?;
+    let credential = credential_from_token(workspace, token);
+    let handles = provider_factory::ProviderFactory::from_config_path(&paths.config)?
+        .build(workspace, credential.as_ref())?;
+    let refs = if let Some(git) = handles.git.as_ref() {
+        download_ref_candidates(
+            git.as_ref(),
+            workspace,
+            version,
+            token.is_some_and(|token| !token.trim().is_empty()),
+        )
+        .await?
+    } else {
+        non_git_ref_candidates(version)
+    };
     let mut last_error: Option<SyncError> = None;
 
-    for git_ref in git_refs {
+    for ref_name in refs {
         let cache_dir = paths
             .workspaces
             .join(workspace.storage_key())
             .join("cache")
-            .join(safe_filename(&git_ref));
+            .join(safe_filename(&ref_name));
         if cache_dir.exists() {
             fs::remove_dir_all(&cache_dir)?;
         }
         fs::create_dir_all(&cache_dir)?;
-        let archive = match provider
-            .download_tarball_with_progress(workspace, &git_ref, &cache_dir, &mut on_progress)
-            .await
+        let mut progress = |done, total| on_progress(done, total);
+        let at = if handles.git.is_some() {
+            SourceRef::Git(GitRef::Sha(ref_name.clone()))
+        } else {
+            source_ref_for_file_source(&ref_name)
+        };
+        let archive = match SkillSourceProvider::download_snapshot(
+            handles.source.as_ref(),
+            workspace,
+            &at,
+            &cache_dir,
+            &mut progress,
+        )
+        .await
         {
             Ok(archive) => archive,
             Err(err) => {
@@ -1143,8 +1374,11 @@ where
         return Ok(PreparedSkillDownload {
             source_dir,
             source_path,
-            source_hash: format!("sha256:{}", archive.sha256),
-            ref_name: git_ref,
+            source_hash: archive
+                .sha256
+                .map(|sha256| format!("sha256:{sha256}"))
+                .unwrap_or_else(|| format!("ref:{}", archive.ref_name)),
+            ref_name: archive.ref_name,
             manifest,
         });
     }
@@ -1304,7 +1538,7 @@ pub async fn prepare_skill_for_review(
 /// Download and extract the repo tarball into `cache_root`, recording the
 /// extracted-root path in `marker` for later cache hits.
 async fn download_review_tarball(
-    provider: &GitHubProvider,
+    provider: &dyn SkillSourceProvider,
     workspace: &WorkspaceRef,
     git_ref: &str,
     cache_root: &Path,
@@ -1314,8 +1548,14 @@ async fn download_review_tarball(
         fs::remove_dir_all(cache_root)?;
     }
     fs::create_dir_all(cache_root)?;
+    let mut progress = |_: u64, _: Option<u64>| {};
     let archive = provider
-        .download_tarball(workspace, git_ref, cache_root)
+        .download_snapshot(
+            workspace,
+            &SourceRef::Git(skill_library_provider::GitRef::Sha(git_ref.to_owned())),
+            cache_root,
+            &mut progress,
+        )
         .await
         .map_err(sync_provider_error)?;
     fs::write(marker, archive.extracted_root.to_string_lossy().as_bytes())?;
@@ -1359,29 +1599,27 @@ fn webhook_events(events: Vec<String>) -> Vec<String> {
     cleaned
 }
 
+fn credential_from_token(
+    workspace: &WorkspaceRef,
+    token: Option<&str>,
+) -> Option<ProviderCredential> {
+    token
+        .filter(|token| !token.trim().is_empty())
+        .map(|token| ProviderCredential {
+            metadata: ProviderCredentialMetadata {
+                provider: workspace.normalized_provider(),
+                login: None,
+                scopes: Vec::new(),
+                auth_mode: AuthMode::PersonalAccessToken,
+            },
+            token: token.to_owned(),
+        })
+}
+
 fn github_provider(workspace: &WorkspaceRef, token: Option<&str>) -> Result<GitHubProvider> {
-    if workspace.provider != "github" {
-        return Err(SyncError::NotFound(format!(
-            "provider {} is not supported",
-            workspace.provider
-        )));
-    }
-    match token {
-        Some(token) if !token.trim().is_empty() => {
-            GitHubProvider::new(token.to_owned()).map_err(|err| {
-                SyncError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    err.to_string(),
-                ))
-            })
-        }
-        _ => GitHubProvider::anonymous("https://api.github.com").map_err(|err| {
-            SyncError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                err.to_string(),
-            ))
-        }),
-    }
+    let credential = credential_from_token(workspace, token);
+    provider_factory::ProviderFactory::default()
+        .build_github_provider(workspace, credential.as_ref())
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -1399,7 +1637,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     }
 }
 
-fn sync_provider_error(err: ProviderError) -> SyncError {
+pub(crate) fn sync_provider_error(err: ProviderError) -> SyncError {
     match err {
         ProviderError::NotFound { resource, .. } => SyncError::RemoteNotFound(resource),
         ProviderError::InvalidResponse(message)
@@ -1517,6 +1755,18 @@ mod tests {
                 reason: "latest is not newer".to_owned()
             }
         );
+    }
+
+    #[tokio::test]
+    async fn scan_github_wrapper_accepts_legacy_provider_name() {
+        let workspace = WorkspaceRef {
+            provider: "github".to_owned(),
+            owner: "acme".to_owned(),
+            repo: "team-skills".to_owned(),
+            remote_id: None,
+        };
+
+        assert_eq!(workspace.normalized_provider(), "github.com");
     }
 
     #[test]

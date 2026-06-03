@@ -17,6 +17,7 @@ import {
 import { useCallback, useEffect, useState } from "react";
 import {
   installSkill,
+  listProviderInstances,
   previewPublish,
   readSkillFile,
   type FileContent,
@@ -25,6 +26,7 @@ import {
 } from "../lib/skill-library";
 import { useLocale } from "../hooks/useLocale";
 import { useLocalStorage } from "../hooks/useLocalStorage";
+import { providerSupportsComments, workspaceProviderId } from "../lib/providers";
 import { getFileContentFromCache, putFileContentInCache } from "../lib/workspaceCache";
 import { effectiveRisk, permissionSummary, riskRequiresConfirmation, riskTone } from "../utils/risk";
 import { CodeEditor } from "./CodeEditor";
@@ -148,6 +150,16 @@ export function SkillDetail({
   const [fileTreeOpen, setFileTreeOpen] = useState(false);
   const [editorResetVersion, setEditorResetVersion] = useState(0);
   const [editorBaseline, setEditorBaseline] = useState<string | null>(null);
+  const providerId = detail?.workspace.provider ?? workspaceProviderId(workspaceRef);
+  const providerInstances = useQuery({
+    queryKey: ["provider-instances"],
+    queryFn: listProviderInstances,
+    staleTime: 10 * 60 * 1000,
+  });
+  const providerInstance = providerInstances.data?.find(
+    (instance) => instance.id.toLowerCase() === providerId.toLowerCase(),
+  );
+  const commentsSupported = providerSupportsComments(providerInstance, providerId);
 
   // Reset internal state when skill changes
   useEffect(() => {
@@ -155,6 +167,12 @@ export function SkillDetail({
     setFullscreen(false);
     setFileTreeOpen(false);
   }, [asset.manifest.id]);
+
+  useEffect(() => {
+    if (!commentsSupported && tab === "comments") {
+      setTab("source");
+    }
+  }, [commentsSupported, setTab, tab]);
 
   const riskLevel = effectiveRisk(activeAsset.manifest);
   const requiresConfirmation = riskRequiresConfirmation(riskLevel);
@@ -428,7 +446,7 @@ export function SkillDetail({
               { id: "source", label: t("skill.tab.source") },
               { id: "metadata", label: t("skill.tab.metadata") },
               { id: "history", label: t("skill.tab.history") },
-              { id: "comments", label: t("skill.tab.comments") },
+              ...(commentsSupported ? [{ id: "comments" as const, label: t("skill.tab.comments") }] : []),
               { id: "risk", label: t("skill.tab.risk") },
             ]}
             active={tab}

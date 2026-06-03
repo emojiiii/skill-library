@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 chrono.workspace = true
 semver.workspace = true
 serde.workspace = true
@@ -15,8 +16,12 @@ skill-library-installer = { path = "../skill-library-installer" }
 skill-library-manifest = { path = "../skill-library-manifest" }
 skill-library-provider = { path = "../skill-library-provider" }
 skill-library-provider-github = { path = "../skill-library-provider-github" }
+skill-library-provider-gitee = { path = "../skill-library-provider-gitee" }
+skill-library-provider-gitlab = { path = "../skill-library-provider-gitlab" }
+skill-library-provider-webdav = { path = "../skill-library-provider-webdav" }
 tempfile.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

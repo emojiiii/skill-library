@@ -108,6 +108,26 @@ export interface AuthStatus {
   githubScopes: string[];
   credentialStore: string;
   warning?: string | null;
+  providers?: ProviderAuthStatus[];
+}
+
+export interface ProviderAuthStatus {
+  provider: string;
+  displayName: string;
+  login?: string | null;
+  scopes: string[];
+  authMode?: string | null;
+  authenticated: boolean;
+}
+
+export interface ProviderInstance {
+  id: string;
+  kind: string | { custom: string };
+  displayName: string;
+  webBaseUrl: string;
+  apiBaseUrl: string;
+  authModes: string[];
+  enabled: boolean;
 }
 
 export interface GitHubLoginResult {
@@ -412,14 +432,49 @@ export async function getAuthStatus(): Promise<AuthStatus> {
       githubScopes: [],
       credentialStore: "browser",
       warning: "Browser preview cannot persist GitHub credentials. Launch the desktop app to sign in.",
+      providers: [],
     };
   }
   return invoke("get_auth_status");
 }
 
+export async function listProviderInstances(): Promise<ProviderInstance[]> {
+  if (!isTauri) return [];
+  return invoke("list_provider_instances");
+}
+
+export async function upsertProviderInstance(instance: ProviderInstance): Promise<ProviderInstance[]> {
+  if (!isTauri) return desktopOnly("Save provider instance");
+  return invoke("upsert_provider_instance", { instance });
+}
+
+export async function deleteProviderInstance(providerId: string): Promise<ProviderInstance[]> {
+  if (!isTauri) return desktopOnly("Delete provider instance");
+  return invoke("delete_provider_instance", { providerId });
+}
+
+export async function loginProviderToken(
+  providerId: string,
+  token: string,
+  options?: { authMode?: string; login?: string },
+): Promise<ProviderAuthStatus> {
+  if (!isTauri) return desktopOnly("Save provider token");
+  return invoke("login_provider_token", {
+    providerId,
+    token,
+    authMode: options?.authMode,
+    login: options?.login,
+  });
+}
+
 export async function loginGithubToken(token: string): Promise<GitHubLoginResult> {
   if (!isTauri) return desktopOnly("Save GitHub token");
   return invoke("login_github_token", { token });
+}
+
+export async function logoutProvider(providerId: string): Promise<void> {
+  if (!isTauri) return desktopOnly("Sign out of provider");
+  return invoke("logout_provider", { providerId });
 }
 
 export async function logoutGithub(): Promise<void> {
@@ -466,6 +521,22 @@ export async function scanGithubWorkspaceStreaming(args: {
   return invoke("scan_github_workspace_streaming", args);
 }
 
+export async function scanRemoteWorkspace(args: {
+  workspace: string;
+  token?: string;
+}): Promise<WorkspaceSkillScan> {
+  if (!isTauri) return desktopOnly("Scan remote workspace");
+  return invoke("scan_remote_workspace", args);
+}
+
+export async function scanRemoteWorkspaceStreaming(args: {
+  workspace: string;
+  token?: string;
+}): Promise<WorkspaceSkillScan> {
+  if (!isTauri) return desktopOnly("Scan remote workspace");
+  return invoke("scan_remote_workspace_streaming", args);
+}
+
 /** Listen for incremental scan progress events. */
 export async function onScanProgress(
   handler: (skills: SkillAsset[]) => void,
@@ -506,6 +577,11 @@ export async function compareSkillVersions(args: {
 export async function listGithubWorkspaces(query?: string): Promise<Workspace[]> {
   if (!isTauri) return [];
   return invoke("list_github_workspaces", { query });
+}
+
+export async function listProviderWorkspaces(providerId: string, query?: string): Promise<Workspace[]> {
+  if (!isTauri) return [];
+  return invoke("list_provider_workspaces", { providerId, query });
 }
 
 export async function listWorkspaces(): Promise<WorkspacesFile> {
@@ -697,6 +773,10 @@ export interface DiscussionComment {
 
 export interface DiscussionsStatus {
   enabled: boolean;
+  supported: boolean;
+  providerId: string;
+  providerName: string;
+  providerKind: string;
   discussions: DiscussionInfo[];
 }
 
@@ -705,7 +785,16 @@ export async function listSkillDiscussions(args: {
   workspace: string;
   skillIds: string[];
 }): Promise<DiscussionsStatus> {
-  if (!isTauri) return { enabled: false, discussions: [] };
+  if (!isTauri) {
+    return {
+      enabled: false,
+      supported: false,
+      providerId: "browser",
+      providerName: "Browser preview",
+      providerKind: "browser",
+      discussions: [],
+    };
+  }
   return invoke("list_skill_discussions", args);
 }
 
@@ -742,7 +831,7 @@ export async function toggleDiscussionReaction(args: {
   workspace: string;
   discussionId: string;
   content: string;
-}): Promise<boolean> {
+}): Promise<ReactionGroup[]> {
   if (!isTauri) return desktopOnly("Toggle discussion reaction");
   return invoke("toggle_discussion_reaction", args);
 }
@@ -752,7 +841,7 @@ export async function removeDiscussionReaction(args: {
   workspace: string;
   discussionId: string;
   content: string;
-}): Promise<boolean> {
+}): Promise<ReactionGroup[]> {
   if (!isTauri) return desktopOnly("Remove discussion reaction");
   return invoke("remove_discussion_reaction", args);
 }
@@ -1187,12 +1276,15 @@ export async function previewPublish(args: {
   return invoke("preview_publish", args);
 }
 
-export interface PullRequestSummary {
+export interface ChangeRequestSummary {
   number: number;
   title: string;
   htmlUrl: string;
   state: string;
+  providerKind: string;
 }
+
+export type PullRequestSummary = ChangeRequestSummary;
 
 export interface PublishAutoMergeResult {
   merged: boolean;
@@ -1204,6 +1296,7 @@ export interface PublishResult {
   package: PublishPreview["package"];
   policy: PublishPolicyResult;
   request: NonNullable<PublishPreview["request"]>;
+  changeRequest: ChangeRequestSummary;
   pullRequest: PullRequestSummary;
   targetWorkspace: string;
   uploadedFiles: string[];

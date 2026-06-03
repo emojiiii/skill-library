@@ -4356,7 +4356,7 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "skill-library-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4379,7 +4379,7 @@ dependencies = [
 
 [[package]]
 name = "skill-library-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
@@ -4394,7 +4394,7 @@ dependencies = [
 
 [[package]]
 name = "skill-library-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -4422,6 +4422,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "toml 0.8.23",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -4430,7 +4431,7 @@ dependencies = [
 
 [[package]]
 name = "skill-library-installer"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
@@ -4446,7 +4447,7 @@ dependencies = [
 
 [[package]]
 name = "skill-library-manifest"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "semver",
  "serde",
@@ -4460,7 +4461,7 @@ dependencies = [
 
 [[package]]
 name = "skill-library-provider"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4471,8 +4472,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "skill-library-provider-gitee"
+version = "0.1.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "flate2",
+ "futures",
+ "mockito",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "skill-library-core",
+ "skill-library-provider",
+ "tar",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "skill-library-provider-github"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4497,8 +4519,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "skill-library-provider-gitlab"
+version = "0.1.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "flate2",
+ "futures",
+ "mockito",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "skill-library-core",
+ "skill-library-provider",
+ "tar",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "skill-library-provider-webdav"
+version = "0.1.1"
+dependencies = [
+ "async-trait",
+ "mockito",
+ "percent-encoding",
+ "quick-xml",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "skill-library-core",
+ "skill-library-provider",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "skill-library-publish"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "hex",
@@ -4514,8 +4577,9 @@ dependencies = [
 
 [[package]]
 name = "skill-library-sync"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
+ "async-trait",
  "chrono",
  "semver",
  "serde",
@@ -4525,10 +4589,14 @@ dependencies = [
  "skill-library-installer",
  "skill-library-manifest",
  "skill-library-provider",
+ "skill-library-provider-gitee",
  "skill-library-provider-github",
+ "skill-library-provider-gitlab",
+ "skill-library-provider-webdav",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

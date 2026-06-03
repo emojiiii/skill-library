@@ -4,7 +4,10 @@ mod db;
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-use skill_library_core::{AppPaths, GitHubCredential, WorkspaceRef};
+use skill_library_core::{
+    normalize_provider_id, AppPaths, AuthMode, GitHubCredential, ProviderCredential,
+    ProviderCredentialMetadata, ProviderInstance, ProviderKind, WorkspaceRef,
+};
 use skill_library_installer::{InstallMetadata, InstallOptions, InstallReport, TargetRoot};
 use skill_library_manifest::{effective_risk, SemanticChange, SkillAsset};
 use skill_library_provider::{
@@ -122,6 +125,7 @@ impl From<skill_library_sync::SyncError> for CommandError {
         let code = match value {
             skill_library_sync::SyncError::NotFound(_) => "subscription_not_found",
             skill_library_sync::SyncError::RemoteNotFound(_) => "remote_not_found",
+            skill_library_sync::SyncError::ProviderUnsupported(_) => "provider_unsupported",
             _ => "sync_error",
         };
         Self::coded(code, value.to_string())
@@ -143,6 +147,12 @@ impl From<std::io::Error> for CommandError {
 impl From<serde_json::Error> for CommandError {
     fn from(value: serde_json::Error) -> Self {
         Self::coded("json_error", value.to_string())
+    }
+}
+
+impl From<toml::ser::Error> for CommandError {
+    fn from(value: toml::ser::Error) -> Self {
+        Self::coded("config_error", value.to_string())
     }
 }
 
@@ -171,28 +181,31 @@ struct PublishResult {
     package: PublishPackage,
     policy: PublishPolicyResult,
     request: PublishRequestSummary,
-    pull_request: PublishPullRequestSummary,
+    change_request: PublishChangeRequestSummary,
+    pull_request: PublishChangeRequestSummary,
     target_workspace: String,
     uploaded_files: Vec<String>,
     auto_merge: Option<PublishAutoMergeResult>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct PublishPullRequestSummary {
+struct PublishChangeRequestSummary {
     number: u64,
     title: String,
     html_url: String,
     state: String,
+    provider_kind: String,
 }
 
-impl From<skill_library_provider::PullRequest> for PublishPullRequestSummary {
+impl From<skill_library_provider::PullRequest> for PublishChangeRequestSummary {
     fn from(value: skill_library_provider::PullRequest) -> Self {
         Self {
             number: value.number,
             title: value.title,
             html_url: value.html_url,
             state: value.state,
+            provider_kind: "pull_request".to_owned(),
         }
     }
 }
@@ -268,6 +281,18 @@ struct AuthStatus {
     github_scopes: Vec<String>,
     credential_store: String,
     warning: Option<String>,
+    providers: Vec<ProviderAuthStatus>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderAuthStatus {
+    provider: String,
+    display_name: String,
+    login: Option<String>,
+    scopes: Vec<String>,
+    auth_mode: Option<AuthMode>,
+    authenticated: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -338,6 +363,7 @@ fn get_auth_status() -> CommandResult<AuthStatus> {
     let paths = AppPaths::resolve()?;
     skill_library_sync::ensure_local_state(&paths)?;
     let github = skill_library_core::load_github_credential(&paths.credentials)?;
+    let providers = provider_auth_statuses(&paths)?;
     let credential_store = skill_library_core::keychain_store_name().to_owned();
     let (github_login, github_scopes, warning) = match github {
         Some(github) => (
@@ -352,7 +378,127 @@ fn get_auth_status() -> CommandResult<AuthStatus> {
         github_scopes,
         credential_store: credential_store.clone(),
         warning,
+        providers,
     })
+}
+
+fn provider_auth_statuses(paths: &AppPaths) -> CommandResult<Vec<ProviderAuthStatus>> {
+    let credentials = skill_library_core::read_credentials(&paths.credentials)?;
+    let mut statuses = Vec::new();
+    for instance in provider_instances(paths)? {
+        let loaded =
+            skill_library_core::load_provider_credential(&paths.credentials, &instance.id)?;
+        let metadata = loaded
+            .as_ref()
+            .map(|credential| credential.metadata.clone())
+            .or_else(|| credentials.providers.get(&instance.id).cloned());
+        statuses.push(ProviderAuthStatus {
+            provider: instance.id,
+            display_name: instance.display_name,
+            login: metadata
+                .as_ref()
+                .and_then(|metadata| metadata.login.clone()),
+            scopes: metadata
+                .as_ref()
+                .map(|metadata| metadata.scopes.clone())
+                .unwrap_or_default(),
+            auth_mode: metadata.map(|metadata| metadata.auth_mode),
+            authenticated: loaded.is_some(),
+        });
+    }
+    Ok(statuses)
+}
+
+#[tauri::command]
+fn list_provider_instances() -> CommandResult<Vec<ProviderInstance>> {
+    let paths = AppPaths::resolve()?;
+    provider_instances(&paths)
+}
+
+#[tauri::command]
+fn upsert_provider_instance(
+    mut instance: ProviderInstance,
+) -> CommandResult<Vec<ProviderInstance>> {
+    let paths = AppPaths::resolve()?;
+    skill_library_sync::ensure_local_state(&paths)?;
+    instance.id = normalize_provider_id(instance.id.trim());
+    instance.display_name = instance.display_name.trim().to_owned();
+    instance.web_base_url = instance
+        .web_base_url
+        .trim()
+        .trim_end_matches('/')
+        .to_owned();
+    instance.api_base_url = instance
+        .api_base_url
+        .trim()
+        .trim_end_matches('/')
+        .to_owned();
+    if instance.id.is_empty() {
+        return Err(CommandError::coded(
+            "missing_provider_id",
+            "Provider id is required",
+        ));
+    }
+    if instance.display_name.is_empty() {
+        instance.display_name = instance.id.clone();
+    }
+    if instance.web_base_url.is_empty() || instance.api_base_url.is_empty() {
+        return Err(CommandError::coded(
+            "missing_provider_url",
+            "Provider web and API URLs are required",
+        ));
+    }
+    validate_provider_url("web_base_url", &instance.web_base_url)?;
+    validate_provider_url("api_base_url", &instance.api_base_url)?;
+
+    let mut config = skill_library_core::read_config(&paths.config)?;
+    config
+        .provider_instances
+        .retain(|existing| normalize_provider_id(&existing.id) != instance.id);
+    config.provider_instances.push(instance);
+    if let Some(parent) = paths.config.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&paths.config, toml::to_string_pretty(&config)?)?;
+    provider_instances(&paths)
+}
+
+#[tauri::command]
+fn delete_provider_instance(provider_id: String) -> CommandResult<Vec<ProviderInstance>> {
+    let paths = AppPaths::resolve()?;
+    let provider_id = normalize_provider_id(provider_id.trim());
+    let mut config = skill_library_core::read_config(&paths.config)?;
+    config
+        .provider_instances
+        .retain(|existing| normalize_provider_id(&existing.id) != provider_id);
+    if let Some(parent) = paths.config.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&paths.config, toml::to_string_pretty(&config)?)?;
+    skill_library_core::delete_provider_credential(&paths.credentials, &provider_id)?;
+    provider_instances(&paths)
+}
+
+fn provider_instances(paths: &AppPaths) -> CommandResult<Vec<ProviderInstance>> {
+    Ok(skill_library_core::provider_instances_from_config_path(
+        &paths.config,
+    )?)
+}
+
+fn validate_provider_url(field: &'static str, value: &str) -> CommandResult<()> {
+    let url = Url::parse(value).map_err(|error| {
+        CommandError::coded(
+            "invalid_provider_url",
+            format!("{field} must be a valid URL: {error}"),
+        )
+    })?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(CommandError::coded(
+            "invalid_provider_url",
+            format!("{field} must be an HTTP(S) URL"),
+        ));
+    }
+    Ok(())
 }
 
 fn credential_warning(paths: &AppPaths, credential_store: &str) -> String {
@@ -370,44 +516,110 @@ fn credential_warning(paths: &AppPaths, credential_store: &str) -> String {
 
 #[tauri::command]
 async fn login_github_token(token: String) -> CommandResult<GitHubLoginResult> {
-    let token = token.trim().to_owned();
-    if token.is_empty() {
-        return Err(CommandError::coded(
-            "missing_github_token",
-            "GitHub token is required",
-        ));
-    }
-
-    let paths = AppPaths::resolve()?;
-    skill_library_sync::ensure_local_state(&paths)?;
-    let provider = GitHubProvider::new(token.clone()).map_err(provider_command_error)?;
-    let info = provider
-        .validate_token()
-        .await
-        .map_err(provider_command_error)?;
-    skill_library_core::save_github_credential(
-        &paths.credentials,
-        GitHubCredential {
-            token,
-            login: Some(info.user.login.clone()),
-            scopes: info.scopes.clone(),
-        },
-    )?;
+    let status = login_provider_token("github.com".to_owned(), token, None, None).await?;
     let credential_store = skill_library_core::keychain_store_name().to_owned();
-
+    let paths = AppPaths::resolve()?;
     Ok(GitHubLoginResult {
-        login: info.user.login,
-        scopes: info.scopes,
+        login: status.login.unwrap_or_default(),
+        scopes: status.scopes,
         credential_store: credential_store.clone(),
         warning: credential_warning(&paths, &credential_store),
     })
 }
 
 #[tauri::command]
-fn logout_github() -> CommandResult<()> {
+async fn login_provider_token(
+    provider_id: String,
+    token: String,
+    auth_mode: Option<AuthMode>,
+    login: Option<String>,
+) -> CommandResult<ProviderAuthStatus> {
+    let provider_id = normalize_provider_id(provider_id.trim());
+    let token = token.trim().to_owned();
+    if token.is_empty() {
+        return Err(CommandError::coded(
+            "missing_provider_token",
+            "Provider token is required",
+        ));
+    }
+
     let paths = AppPaths::resolve()?;
     skill_library_sync::ensure_local_state(&paths)?;
-    skill_library_core::delete_github_credential(&paths.credentials)?;
+    let instance = provider_instances(&paths)?
+        .into_iter()
+        .find(|instance| instance.id == provider_id)
+        .ok_or_else(|| {
+            CommandError::coded(
+                "provider_unsupported",
+                format!("provider {provider_id} is not configured"),
+            )
+        })?;
+    if provider_id != "github.com" {
+        let auth_mode = auth_mode
+            .or_else(|| instance.auth_modes.first().cloned())
+            .unwrap_or(AuthMode::PersonalAccessToken);
+        let login = login
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        skill_library_core::save_provider_credential(
+            &paths.credentials,
+            ProviderCredential {
+                metadata: ProviderCredentialMetadata {
+                    provider: provider_id.clone(),
+                    login: login.clone(),
+                    scopes: Vec::new(),
+                    auth_mode: auth_mode.clone(),
+                },
+                token,
+            },
+        )?;
+        return Ok(ProviderAuthStatus {
+            provider: provider_id,
+            display_name: instance.display_name,
+            login,
+            scopes: Vec::new(),
+            auth_mode: Some(auth_mode),
+            authenticated: true,
+        });
+    }
+    let provider = GitHubProvider::new(token.clone()).map_err(provider_command_error)?;
+    let info = provider
+        .validate_token()
+        .await
+        .map_err(provider_command_error)?;
+    skill_library_core::save_provider_credential(
+        &paths.credentials,
+        ProviderCredential {
+            metadata: ProviderCredentialMetadata {
+                provider: provider_id.clone(),
+                login: Some(info.user.login.clone()),
+                scopes: info.scopes.clone(),
+                auth_mode: AuthMode::PersonalAccessToken,
+            },
+            token,
+        },
+    )?;
+
+    Ok(ProviderAuthStatus {
+        provider: provider_id,
+        display_name: instance.display_name,
+        login: Some(info.user.login),
+        scopes: info.scopes,
+        auth_mode: Some(AuthMode::PersonalAccessToken),
+        authenticated: true,
+    })
+}
+
+#[tauri::command]
+fn logout_github() -> CommandResult<()> {
+    logout_provider("github.com".to_owned())
+}
+
+#[tauri::command]
+fn logout_provider(provider_id: String) -> CommandResult<()> {
+    let paths = AppPaths::resolve()?;
+    skill_library_sync::ensure_local_state(&paths)?;
+    skill_library_core::delete_provider_credential(&paths.credentials, &provider_id)?;
     Ok(())
 }
 
@@ -519,15 +731,27 @@ async fn add_workspace(
     let paths = AppPaths::resolve()?;
     skill_library_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
-    let token = token.or_else(|| saved_github_token(&paths));
     let webhook = workspace_webhook_registration(webhook_url, webhook_secret, webhook_events)?;
-    Ok(skill_library_sync::add_github_workspace_with_webhook(
-        &paths.workspace_registry,
-        &workspace,
-        token.as_deref(),
-        webhook,
-    )
-    .await?)
+    if webhook.is_some() {
+        ensure_github_capability(&paths, &workspace, "webhooks_unsupported", "webhooks")?;
+        let token = token.or_else(|| saved_github_token(&paths));
+        Ok(skill_library_sync::add_github_workspace_with_webhook(
+            &paths.workspace_registry,
+            &workspace,
+            token.as_deref(),
+            webhook,
+        )
+        .await?)
+    } else {
+        let credential = command_provider_credential(&paths, &workspace, token)?;
+        Ok(skill_library_sync::add_remote_workspace_with_instances(
+            &paths.workspace_registry,
+            &workspace,
+            credential.as_ref(),
+            provider_instances(&paths)?,
+        )
+        .await?)
+    }
 }
 
 #[tauri::command]
@@ -573,6 +797,55 @@ async fn scan_github_workspace_streaming(
 }
 
 #[tauri::command]
+async fn scan_remote_workspace(
+    workspace: String,
+    token: Option<String>,
+) -> CommandResult<WorkspaceSkillsResponse> {
+    let paths = AppPaths::resolve()?;
+    skill_library_sync::ensure_local_state(&paths)?;
+    let workspace = parse_workspace(&workspace)?;
+    let credential = command_provider_credential(&paths, &workspace, token)?;
+    let remote: RemoteWorkspaceSkills =
+        skill_library_sync::scan_remote_workspace_skills_with_instances(
+            &workspace,
+            credential.as_ref(),
+            provider_instances(&paths)?,
+        )
+        .await?;
+    Ok(WorkspaceSkillsResponse {
+        workspace: remote.workspace,
+        skills: remote.skills,
+    })
+}
+
+#[tauri::command]
+async fn scan_remote_workspace_streaming(
+    app: tauri::AppHandle,
+    workspace: String,
+    token: Option<String>,
+) -> CommandResult<WorkspaceSkillsResponse> {
+    let paths = AppPaths::resolve()?;
+    skill_library_sync::ensure_local_state(&paths)?;
+    let workspace = parse_workspace(&workspace)?;
+    let credential = command_provider_credential(&paths, &workspace, token)?;
+    let app_handle = app.clone();
+    let remote: RemoteWorkspaceSkills =
+        skill_library_sync::scan_remote_workspace_skills_streaming_with_instances(
+            &workspace,
+            credential.as_ref(),
+            provider_instances(&paths)?,
+            |batch| {
+                let _ = app_handle.emit("workspace-scan-progress", batch);
+            },
+        )
+        .await?;
+    Ok(WorkspaceSkillsResponse {
+        workspace: remote.workspace,
+        skills: remote.skills,
+    })
+}
+
+#[tauri::command]
 async fn get_workspace_detail(
     workspace: String,
     token: Option<String>,
@@ -580,8 +853,15 @@ async fn get_workspace_detail(
     let paths = AppPaths::resolve()?;
     skill_library_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
-    let token = token.or_else(|| saved_github_token(&paths));
-    Ok(skill_library_sync::scan_github_workspace_detail(&workspace, token.as_deref()).await?)
+    let credential = command_provider_credential(&paths, &workspace, token)?;
+    Ok(
+        skill_library_sync::scan_remote_workspace_detail_with_instances(
+            &workspace,
+            credential.as_ref(),
+            provider_instances(&paths)?,
+        )
+        .await?,
+    )
 }
 
 #[tauri::command]
@@ -594,12 +874,13 @@ async fn get_skill_detail(
     let paths = AppPaths::resolve()?;
     skill_library_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
-    let token = token.or_else(|| saved_github_token(&paths));
-    Ok(skill_library_sync::read_github_skill_detail(
+    let credential = command_provider_credential(&paths, &workspace, token)?;
+    Ok(skill_library_sync::read_remote_skill_detail_with_instances(
         &workspace,
         &skill_path,
         ref_name.as_deref(),
-        token.as_deref(),
+        credential.as_ref(),
+        provider_instances(&paths)?,
     )
     .await?)
 }
@@ -711,22 +992,29 @@ async fn search_skills_registry(
 
 #[tauri::command]
 async fn list_github_workspaces(query: Option<String>) -> CommandResult<Vec<Workspace>> {
+    list_provider_workspaces("github.com".to_owned(), query).await
+}
+
+#[tauri::command]
+async fn list_provider_workspaces(
+    provider_id: String,
+    query: Option<String>,
+) -> CommandResult<Vec<Workspace>> {
     let paths = AppPaths::resolve()?;
     skill_library_sync::ensure_local_state(&paths)?;
-    let token = saved_github_token(&paths).ok_or_else(|| {
-        CommandError::coded(
-            "missing_github_token",
-            "log in with a GitHub token before listing repositories",
-        )
-    })?;
-    let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
-    let page = provider
-        .list_workspaces(PageOpts {
+    let provider_id = normalize_provider_id(provider_id.trim());
+    let credential =
+        skill_library_core::load_provider_credential(&paths.credentials, &provider_id)?;
+    let page = skill_library_sync::list_remote_workspaces_with_instances(
+        &provider_id,
+        credential.as_ref(),
+        provider_instances(&paths)?,
+        PageOpts {
             cursor: None,
             per_page: Some(100),
-        })
-        .await
-        .map_err(provider_command_error)?;
+        },
+    )
+    .await?;
     let needle = query.unwrap_or_default().trim().to_lowercase();
     let mut workspaces: Vec<Workspace> = page
         .items
@@ -749,6 +1037,7 @@ async fn invite_github_collaborator(
     let paths = AppPaths::resolve()?;
     skill_library_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
+    ensure_github_capability(&paths, &workspace, "invitations_unsupported", "invitations")?;
     let token = token
         .or_else(|| saved_github_token(&paths))
         .ok_or_else(|| {
@@ -799,6 +1088,7 @@ async fn list_workspace_members(
     let paths = AppPaths::resolve()?;
     skill_library_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
+    ensure_github_capability(&paths, &workspace, "members_unsupported", "members")?;
     let token = token
         .or_else(|| saved_github_token(&paths))
         .ok_or_else(|| {
@@ -832,28 +1122,30 @@ async fn compare_skill_versions(
     let paths = AppPaths::resolve()?;
     skill_library_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
-    let token = token.or_else(|| saved_github_token(&paths));
-    let provider = github_provider(token.as_deref())?;
-    let comparison = provider
-        .compare_refs(
-            &workspace,
-            &GitRef::Tag(from.clone()),
-            &GitRef::Tag(to.clone()),
-        )
-        .await
-        .map_err(provider_command_error)?;
-    let from_detail = skill_library_sync::read_github_skill_detail(
+    let credential = command_provider_credential(&paths, &workspace, token)?;
+    let instances = provider_instances(&paths)?;
+    let comparison = skill_library_sync::compare_remote_refs_with_instances(
+        &workspace,
+        credential.as_ref(),
+        instances.clone(),
+        &GitRef::Tag(from.clone()),
+        &GitRef::Tag(to.clone()),
+    )
+    .await?;
+    let from_detail = skill_library_sync::read_remote_skill_detail_with_instances(
         &workspace,
         &skill_path,
         Some(&from),
-        token.as_deref(),
+        credential.as_ref(),
+        instances.clone(),
     )
     .await?;
-    let to_detail = skill_library_sync::read_github_skill_detail(
+    let to_detail = skill_library_sync::read_remote_skill_detail_with_instances(
         &workspace,
         &skill_path,
         Some(&to),
-        token.as_deref(),
+        credential.as_ref(),
+        instances,
     )
     .await?;
     let files = comparison
@@ -3167,6 +3459,9 @@ async fn preview_publish_from_workspace(
 ) -> CommandResult<PublishPreview> {
     let paths = AppPaths::resolve()?;
     skill_library_sync::ensure_local_state(&paths)?;
+    let source_ws = parse_workspace(&source_workspace)?;
+    let target_ws = parse_workspace(&target_workspace)?;
+    ensure_github_publish_path(&paths, Some(&source_ws), &target_ws)?;
     let token = saved_github_token(&paths).ok_or_else(|| {
         CommandError::coded(
             "missing_github_token",
@@ -3175,8 +3470,6 @@ async fn preview_publish_from_workspace(
     })?;
     let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
 
-    let source_ws = parse_workspace(&source_workspace)?;
-    let target_ws = parse_workspace(&target_workspace)?;
     let git_ref = match source_ref
         .as_deref()
         .map(str::trim)
@@ -3239,6 +3532,9 @@ async fn publish_skill_to_workspace(
 ) -> CommandResult<PublishResult> {
     let paths = AppPaths::resolve()?;
     skill_library_sync::ensure_local_state(&paths)?;
+    let source_ws = parse_workspace(&source_workspace)?;
+    let target_ws = parse_workspace(&target_workspace)?;
+    ensure_github_publish_path(&paths, Some(&source_ws), &target_ws)?;
     let token = saved_github_token(&paths).ok_or_else(|| {
         CommandError::coded(
             "missing_github_token",
@@ -3247,8 +3543,6 @@ async fn publish_skill_to_workspace(
     })?;
     let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
 
-    let source_ws = parse_workspace(&source_workspace)?;
-    let target_ws = parse_workspace(&target_workspace)?;
     let git_ref = match source_ref
         .as_deref()
         .map(str::trim)
@@ -3350,12 +3644,14 @@ async fn publish_skill_to_workspace(
     } else {
         None
     };
+    let change_request = PublishChangeRequestSummary::from(result.pull_request);
 
     Ok(PublishResult {
         package,
         policy,
         request,
-        pull_request: result.pull_request.into(),
+        change_request: change_request.clone(),
+        pull_request: change_request,
         target_workspace: target_ws.full_name(),
         uploaded_files: result.uploaded.into_iter().map(|f| f.path).collect(),
         auto_merge,
@@ -3375,6 +3671,8 @@ async fn publish_workspace_skill_update(
 ) -> CommandResult<PublishResult> {
     let paths = AppPaths::resolve()?;
     skill_library_sync::ensure_local_state(&paths)?;
+    let target_ws = parse_workspace(&workspace)?;
+    ensure_github_publish_path(&paths, None, &target_ws)?;
     let token = saved_github_token(&paths).ok_or_else(|| {
         CommandError::coded(
             "missing_github_token",
@@ -3383,7 +3681,6 @@ async fn publish_workspace_skill_update(
     })?;
     let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
 
-    let target_ws = parse_workspace(&workspace)?;
     let git_ref = workspace_git_ref(&provider, &target_ws, source_ref.as_deref()).await?;
     let scratch =
         fetch_remote_skill_to_temp(&provider, &paths, &target_ws, &skill_path, &git_ref, None)
@@ -3478,12 +3775,14 @@ async fn publish_workspace_skill_update(
     } else {
         None
     };
+    let change_request = PublishChangeRequestSummary::from(result.pull_request);
 
     Ok(PublishResult {
         package,
         policy,
         request,
-        pull_request: result.pull_request.into(),
+        change_request: change_request.clone(),
+        pull_request: change_request,
         target_workspace: target_ws.full_name(),
         uploaded_files: result.uploaded.into_iter().map(|f| f.path).collect(),
         auto_merge,
@@ -3755,17 +4054,156 @@ fn parse_query_pairs(url: &Url) -> HashMap<String, String> {
 }
 
 fn parse_workspace(value: &str) -> CommandResult<WorkspaceRef> {
-    let value = value
+    let instances = AppPaths::resolve()
+        .ok()
+        .and_then(|paths| provider_instances(&paths).ok())
+        .unwrap_or_else(skill_library_core::default_provider_instances);
+    parse_workspace_with_instances(value, &instances)
+}
+
+fn parse_workspace_with_instances(
+    value: &str,
+    instances: &[ProviderInstance],
+) -> CommandResult<WorkspaceRef> {
+    let parts = value
         .trim()
-        .strip_prefix("github.com/")
-        .unwrap_or_else(|| value.trim());
-    let Some((owner, repo)) = value.split_once('/') else {
-        return Err(CommandError::coded(
+        .trim_matches('/')
+        .split('/')
+        .filter(|part| !part.trim().is_empty())
+        .collect::<Vec<_>>();
+    match parts.as_slice() {
+        [owner, repo] => {
+            let provider_id = normalize_provider_id(owner);
+            if let Some(instance) = provider_instance_from_slice(instances, &provider_id) {
+                if matches!(instance.kind, ProviderKind::WebDav) {
+                    return Ok(WorkspaceRef {
+                        provider: provider_id,
+                        owner: String::new(),
+                        repo: (*repo).to_owned(),
+                        remote_id: Some((*repo).to_owned()),
+                    });
+                }
+            }
+            Ok(WorkspaceRef::github(*owner, *repo))
+        }
+        [provider, namespace @ .., repo] if !namespace.is_empty() => {
+            let provider_id = normalize_provider_id(provider);
+            let remote_path = namespace
+                .iter()
+                .chain(std::iter::once(repo))
+                .copied()
+                .collect::<Vec<_>>()
+                .join("/");
+            let remote_id = provider_instance_from_slice(instances, &provider_id)
+                .filter(|instance| matches!(instance.kind, ProviderKind::WebDav))
+                .map(|_| remote_path);
+            Ok(WorkspaceRef {
+                provider: provider_id,
+                owner: namespace.join("/"),
+                repo: (*repo).to_owned(),
+                remote_id,
+            })
+        }
+        _ => Err(CommandError::coded(
             "invalid_workspace",
-            "workspace must look like owner/repo or github.com/owner/repo",
-        ));
-    };
-    Ok(WorkspaceRef::github(owner, repo))
+            "workspace must look like owner/repo or provider/namespace/repo",
+        )),
+    }
+}
+
+fn provider_instance_from_slice<'a>(
+    instances: &'a [ProviderInstance],
+    provider_id: &str,
+) -> Option<&'a ProviderInstance> {
+    instances
+        .iter()
+        .find(|instance| normalize_provider_id(&instance.id) == provider_id)
+}
+
+fn provider_instance_for_workspace(
+    paths: &AppPaths,
+    workspace: &WorkspaceRef,
+) -> CommandResult<ProviderInstance> {
+    let provider_id = workspace.normalized_provider();
+    provider_instances(paths)?
+        .into_iter()
+        .find(|instance| normalize_provider_id(&instance.id) == provider_id && instance.enabled)
+        .ok_or_else(|| {
+            CommandError::coded(
+                "provider_unsupported",
+                format!("provider {provider_id} is not configured"),
+            )
+        })
+}
+
+fn provider_label(instance: &ProviderInstance) -> String {
+    if instance.display_name.trim().is_empty() {
+        instance.id.clone()
+    } else {
+        format!("{} ({})", instance.display_name, instance.id)
+    }
+}
+
+fn unsupported_capability_error(
+    code: &'static str,
+    capability: &str,
+    instance: &ProviderInstance,
+) -> CommandError {
+    let provider = provider_label(instance);
+    match &instance.kind {
+        ProviderKind::WebDav if capability == "change requests" => CommandError::coded(
+            code,
+            format!(
+                "{provider} is a WebDAV source and does not support reviewed ChangeRequest publishing; direct upload requires explicit confirmation and is not implemented yet"
+            ),
+        ),
+        ProviderKind::GitLab | ProviderKind::Gitee if capability == "change requests" => {
+            CommandError::coded(
+                code,
+                format!("{provider} change request publishing is not implemented yet"),
+            )
+        }
+        _ => CommandError::coded(
+            code,
+            format!("{provider} does not support {capability} in this build"),
+        ),
+    }
+}
+
+fn ensure_github_capability(
+    paths: &AppPaths,
+    workspace: &WorkspaceRef,
+    code: &'static str,
+    capability: &str,
+) -> CommandResult<()> {
+    let instance = provider_instance_for_workspace(paths, workspace)?;
+    if matches!(&instance.kind, ProviderKind::GitHub) {
+        Ok(())
+    } else {
+        Err(unsupported_capability_error(code, capability, &instance))
+    }
+}
+
+fn ensure_github_publish_path(
+    paths: &AppPaths,
+    source: Option<&WorkspaceRef>,
+    target: &WorkspaceRef,
+) -> CommandResult<()> {
+    ensure_github_capability(
+        paths,
+        target,
+        "change_requests_unsupported",
+        "change requests",
+    )?;
+    if let Some(source) = source {
+        ensure_github_capability(
+            paths,
+            source,
+            "publish_source_unsupported",
+            "workspace publish source reads",
+        )?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -3791,6 +4229,13 @@ struct WorkspaceChangedPaths {
 async fn check_workspace_head(workspace: String) -> CommandResult<WorkspaceHeadInfo> {
     let paths = AppPaths::resolve()?;
     skill_library_sync::ensure_local_state(&paths)?;
+    let workspace = parse_workspace(&workspace)?;
+    ensure_github_capability(
+        &paths,
+        &workspace,
+        "activity_unsupported",
+        "repository activity",
+    )?;
     let token = saved_github_token(&paths).ok_or_else(|| {
         CommandError::coded(
             "missing_github_token",
@@ -3798,7 +4243,6 @@ async fn check_workspace_head(workspace: String) -> CommandResult<WorkspaceHeadI
         )
     })?;
     let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
-    let workspace = parse_workspace(&workspace)?;
 
     // Get workspace info for default branch name
     let ws_info = provider
@@ -3834,24 +4278,17 @@ async fn diff_workspace_since(
 ) -> CommandResult<WorkspaceChangedPaths> {
     let paths = AppPaths::resolve()?;
     skill_library_sync::ensure_local_state(&paths)?;
-    let token = saved_github_token(&paths).ok_or_else(|| {
-        CommandError::coded(
-            "missing_github_token",
-            "log in with GitHub before diffing workspace",
-        )
-    })?;
-    let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
     let workspace = parse_workspace(&workspace)?;
+    let credential = command_provider_credential(&paths, &workspace, None)?;
 
-    // GitHub compare API accepts SHAs as branch refs
-    let comparison = provider
-        .compare_refs(
-            &workspace,
-            &GitRef::Branch(base_sha.clone()),
-            &GitRef::Branch(head_sha.clone()),
-        )
-        .await
-        .map_err(provider_command_error)?;
+    let comparison = skill_library_sync::compare_remote_refs_with_instances(
+        &workspace,
+        credential.as_ref(),
+        provider_instances(&paths)?,
+        &GitRef::Branch(base_sha.clone()),
+        &GitRef::Branch(head_sha.clone()),
+    )
+    .await?;
 
     let total_changed_files = comparison.files.len();
 
@@ -4175,7 +4612,38 @@ struct DiscussionComment {
 #[serde(rename_all = "camelCase")]
 struct DiscussionsStatus {
     enabled: bool,
+    supported: bool,
+    provider_id: String,
+    provider_name: String,
+    provider_kind: String,
     discussions: Vec<DiscussionInfo>,
+}
+
+fn provider_kind_key(kind: &ProviderKind) -> String {
+    match kind {
+        ProviderKind::GitHub => "github",
+        ProviderKind::GitLab => "gitlab",
+        ProviderKind::Gitee => "gitee",
+        ProviderKind::WebDav => "webdav",
+        ProviderKind::Custom(value) => value.as_str(),
+    }
+    .to_owned()
+}
+
+fn discussions_status_for_provider(
+    instance: &ProviderInstance,
+    enabled: bool,
+    supported: bool,
+    discussions: Vec<DiscussionInfo>,
+) -> DiscussionsStatus {
+    DiscussionsStatus {
+        enabled,
+        supported,
+        provider_id: normalize_provider_id(&instance.id),
+        provider_name: instance.display_name.clone(),
+        provider_kind: provider_kind_key(&instance.kind),
+        discussions,
+    }
 }
 
 /// Check if Discussions are enabled and list skill discussions.
@@ -4187,6 +4655,15 @@ async fn list_skill_discussions(
     let paths = AppPaths::resolve()?;
     skill_library_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
+    let instance = provider_instance_for_workspace(&paths, &workspace)?;
+    if !matches!(&instance.kind, ProviderKind::GitHub) {
+        return Ok(discussions_status_for_provider(
+            &instance,
+            false,
+            false,
+            Vec::new(),
+        ));
+    }
     let token = saved_github_token(&paths)
         .ok_or_else(|| CommandError::coded("missing_github_token", "log in with GitHub first"))?;
     let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
@@ -4277,17 +4754,21 @@ async fn list_skill_discussions(
         .map_err(provider_command_error)?;
 
     let Some(repo) = result.repository else {
-        return Ok(DiscussionsStatus {
-            enabled: false,
-            discussions: Vec::new(),
-        });
+        return Ok(discussions_status_for_provider(
+            &instance,
+            false,
+            true,
+            Vec::new(),
+        ));
     };
 
     if !repo.has_discussions_enabled {
-        return Ok(DiscussionsStatus {
-            enabled: false,
-            discussions: Vec::new(),
-        });
+        return Ok(discussions_status_for_provider(
+            &instance,
+            false,
+            true,
+            Vec::new(),
+        ));
     }
 
     let discussions: Vec<DiscussionInfo> = repo
@@ -4336,10 +4817,12 @@ async fn list_skill_discussions(
         })
         .collect();
 
-    Ok(DiscussionsStatus {
-        enabled: true,
+    Ok(discussions_status_for_provider(
+        &instance,
+        true,
+        true,
         discussions,
-    })
+    ))
 }
 
 /// Get a single discussion by number (used with cached mapping to skip full scan).
@@ -4351,6 +4834,7 @@ async fn get_discussion_by_number(
     let paths = AppPaths::resolve()?;
     skill_library_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
+    ensure_github_capability(&paths, &workspace, "discussions_unsupported", "discussions")?;
     let token = saved_github_token(&paths)
         .ok_or_else(|| CommandError::coded("missing_github_token", "log in with GitHub first"))?;
     let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
@@ -4474,6 +4958,7 @@ async fn get_discussion_comments(
     let paths = AppPaths::resolve()?;
     skill_library_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
+    ensure_github_capability(&paths, &workspace, "discussions_unsupported", "discussions")?;
     let token = saved_github_token(&paths)
         .ok_or_else(|| CommandError::coded("missing_github_token", "log in with GitHub first"))?;
     let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
@@ -4598,7 +5083,8 @@ async fn add_discussion_comment(
 ) -> CommandResult<DiscussionComment> {
     let paths = AppPaths::resolve()?;
     skill_library_sync::ensure_local_state(&paths)?;
-    let _workspace = parse_workspace(&workspace)?;
+    let workspace = parse_workspace(&workspace)?;
+    ensure_github_capability(&paths, &workspace, "discussions_unsupported", "discussions")?;
     let token = saved_github_token(&paths)
         .ok_or_else(|| CommandError::coded("missing_github_token", "log in with GitHub first"))?;
     let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
@@ -4679,7 +5165,8 @@ async fn toggle_discussion_reaction(
 ) -> CommandResult<Vec<ReactionGroup>> {
     let paths = AppPaths::resolve()?;
     skill_library_sync::ensure_local_state(&paths)?;
-    let _workspace = parse_workspace(&workspace)?;
+    let workspace = parse_workspace(&workspace)?;
+    ensure_github_capability(&paths, &workspace, "discussions_unsupported", "discussions")?;
     let token = saved_github_token(&paths)
         .ok_or_else(|| CommandError::coded("missing_github_token", "log in with GitHub first"))?;
     let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
@@ -4787,7 +5274,8 @@ async fn remove_discussion_reaction(
 ) -> CommandResult<Vec<ReactionGroup>> {
     let paths = AppPaths::resolve()?;
     skill_library_sync::ensure_local_state(&paths)?;
-    let _workspace = parse_workspace(&workspace)?;
+    let workspace = parse_workspace(&workspace)?;
+    ensure_github_capability(&paths, &workspace, "discussions_unsupported", "discussions")?;
     let token = saved_github_token(&paths)
         .ok_or_else(|| CommandError::coded("missing_github_token", "log in with GitHub first"))?;
     let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
@@ -4870,6 +5358,7 @@ async fn create_skill_discussion(
     let paths = AppPaths::resolve()?;
     skill_library_sync::ensure_local_state(&paths)?;
     let workspace = parse_workspace(&workspace)?;
+    ensure_github_capability(&paths, &workspace, "discussions_unsupported", "discussions")?;
     let token = saved_github_token(&paths)
         .ok_or_else(|| CommandError::coded("missing_github_token", "log in with GitHub first"))?;
     let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
@@ -5098,6 +5587,13 @@ async fn list_skill_commits(
 ) -> CommandResult<Vec<CommitSummary>> {
     let paths = AppPaths::resolve()?;
     skill_library_sync::ensure_local_state(&paths)?;
+    let workspace = parse_workspace(&workspace)?;
+    ensure_github_capability(
+        &paths,
+        &workspace,
+        "activity_unsupported",
+        "repository activity",
+    )?;
     let token = saved_github_token(&paths).ok_or_else(|| {
         CommandError::coded(
             "missing_github_token",
@@ -5105,7 +5601,6 @@ async fn list_skill_commits(
         )
     })?;
     let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
-    let workspace = parse_workspace(&workspace)?;
     let path = skill_path.trim_matches('/');
     provider
         .list_path_commits(&workspace, path, ref_name.as_deref(), limit.unwrap_or(30))
@@ -5120,6 +5615,13 @@ async fn list_workspace_pull_requests(
 ) -> CommandResult<Vec<PullRequestSummary>> {
     let paths = AppPaths::resolve()?;
     skill_library_sync::ensure_local_state(&paths)?;
+    let workspace = parse_workspace(&workspace)?;
+    ensure_github_capability(
+        &paths,
+        &workspace,
+        "change_requests_unsupported",
+        "change requests",
+    )?;
     let token = saved_github_token(&paths).ok_or_else(|| {
         CommandError::coded(
             "missing_github_token",
@@ -5127,7 +5629,6 @@ async fn list_workspace_pull_requests(
         )
     })?;
     let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
-    let workspace = parse_workspace(&workspace)?;
     let state = match state.as_deref() {
         Some("closed") => PullRequestQueryState::Closed,
         Some("all") => PullRequestQueryState::All,
@@ -5146,6 +5647,13 @@ async fn list_workspace_pull_request_files(
 ) -> CommandResult<Vec<ChangedFile>> {
     let paths = AppPaths::resolve()?;
     skill_library_sync::ensure_local_state(&paths)?;
+    let workspace = parse_workspace(&workspace)?;
+    ensure_github_capability(
+        &paths,
+        &workspace,
+        "change_requests_unsupported",
+        "change requests",
+    )?;
     let token = saved_github_token(&paths).ok_or_else(|| {
         CommandError::coded(
             "missing_github_token",
@@ -5153,7 +5661,6 @@ async fn list_workspace_pull_request_files(
         )
     })?;
     let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
-    let workspace = parse_workspace(&workspace)?;
     provider
         .list_pull_request_files(&workspace, number)
         .await
@@ -5170,6 +5677,13 @@ async fn merge_workspace_pull_request(
 ) -> CommandResult<PublishAutoMergeResult> {
     let paths = AppPaths::resolve()?;
     skill_library_sync::ensure_local_state(&paths)?;
+    let workspace = parse_workspace(&workspace)?;
+    ensure_github_capability(
+        &paths,
+        &workspace,
+        "change_requests_unsupported",
+        "change requests",
+    )?;
     let token = saved_github_token(&paths).ok_or_else(|| {
         CommandError::coded(
             "missing_github_token",
@@ -5177,7 +5691,6 @@ async fn merge_workspace_pull_request(
         )
     })?;
     let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
-    let workspace = parse_workspace(&workspace)?;
     let result = provider
         .merge_pull_request(&workspace, number)
         .await
@@ -5212,6 +5725,13 @@ async fn close_workspace_pull_request(
 ) -> CommandResult<PullRequestSummary> {
     let paths = AppPaths::resolve()?;
     skill_library_sync::ensure_local_state(&paths)?;
+    let workspace = parse_workspace(&workspace)?;
+    ensure_github_capability(
+        &paths,
+        &workspace,
+        "change_requests_unsupported",
+        "change requests",
+    )?;
     let token = saved_github_token(&paths).ok_or_else(|| {
         CommandError::coded(
             "missing_github_token",
@@ -5219,7 +5739,6 @@ async fn close_workspace_pull_request(
         )
     })?;
     let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
-    let workspace = parse_workspace(&workspace)?;
     if let Some(comment) = comment
         .as_deref()
         .map(str::trim)
@@ -5244,6 +5763,13 @@ async fn add_workspace_pull_request_comment(
 ) -> CommandResult<IssueComment> {
     let paths = AppPaths::resolve()?;
     skill_library_sync::ensure_local_state(&paths)?;
+    let workspace = parse_workspace(&workspace)?;
+    ensure_github_capability(
+        &paths,
+        &workspace,
+        "change_requests_unsupported",
+        "change requests",
+    )?;
     let token = saved_github_token(&paths).ok_or_else(|| {
         CommandError::coded(
             "missing_github_token",
@@ -5251,7 +5777,6 @@ async fn add_workspace_pull_request_comment(
         )
     })?;
     let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
-    let workspace = parse_workspace(&workspace)?;
     let body = body.trim();
     if body.is_empty() {
         return Err(CommandError::coded(
@@ -5269,6 +5794,13 @@ async fn add_workspace_pull_request_comment(
 async fn list_workspace_events(workspace: String) -> CommandResult<Vec<RepositoryEvent>> {
     let paths = AppPaths::resolve()?;
     skill_library_sync::ensure_local_state(&paths)?;
+    let workspace = parse_workspace(&workspace)?;
+    ensure_github_capability(
+        &paths,
+        &workspace,
+        "activity_unsupported",
+        "repository activity",
+    )?;
     let token = saved_github_token(&paths).ok_or_else(|| {
         CommandError::coded(
             "missing_github_token",
@@ -5276,7 +5808,6 @@ async fn list_workspace_events(workspace: String) -> CommandResult<Vec<Repositor
         )
     })?;
     let provider = GitHubProvider::new(token).map_err(provider_command_error)?;
-    let workspace = parse_workspace(&workspace)?;
     provider
         .list_repository_events(&workspace)
         .await
@@ -5370,10 +5901,36 @@ fn workspace_webhook_registration(
 }
 
 fn saved_github_token(paths: &AppPaths) -> Option<String> {
-    skill_library_core::load_github_credential(&paths.credentials)
+    saved_provider_token(paths, "github.com")
+}
+
+fn saved_provider_token(paths: &AppPaths, provider_id: &str) -> Option<String> {
+    skill_library_core::load_provider_credential(&paths.credentials, provider_id)
         .ok()
         .flatten()
-        .map(|github| github.token)
+        .map(|credential| credential.token)
+}
+
+fn command_provider_credential(
+    paths: &AppPaths,
+    workspace: &WorkspaceRef,
+    token: Option<String>,
+) -> CommandResult<Option<ProviderCredential>> {
+    if let Some(token) = token.filter(|token| !token.trim().is_empty()) {
+        return Ok(Some(ProviderCredential {
+            metadata: ProviderCredentialMetadata {
+                provider: workspace.normalized_provider(),
+                login: None,
+                scopes: Vec::new(),
+                auth_mode: AuthMode::PersonalAccessToken,
+            },
+            token,
+        }));
+    }
+    Ok(skill_library_core::load_provider_credential(
+        &paths.credentials,
+        &workspace.normalized_provider(),
+    )?)
 }
 
 // ---------------------------------------------------------------------------
@@ -5999,9 +6556,14 @@ pub fn run() {
             diff_workspace_since,
             compare_skill_versions,
             get_auth_status,
+            list_provider_instances,
+            upsert_provider_instance,
+            delete_provider_instance,
             start_github_device_flow,
             poll_github_device_flow,
+            login_provider_token,
             login_github_token,
+            logout_provider,
             logout_github,
             get_skill_detail,
             get_workspace_detail,
@@ -6009,6 +6571,7 @@ pub fn run() {
             list_workspace_members,
             export_diagnostics,
             open_logs_folder,
+            list_provider_workspaces,
             list_github_workspaces,
             search_skills_registry,
             save_ai_key,
@@ -6021,6 +6584,8 @@ pub fn run() {
             review_skill,
             list_workspaces,
             scan_workspace,
+            scan_remote_workspace,
+            scan_remote_workspace_streaming,
             scan_github_workspace,
             scan_github_workspace_streaming,
             parse_skill,
@@ -6092,9 +6657,12 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_runtime_targets, humanize_agent_dir_name, local_agent_root_specs,
-        redact_sensitive_text, CommandError,
+        default_runtime_targets, discussions_status_for_provider, humanize_agent_dir_name,
+        local_agent_root_specs, parse_workspace_with_instances, redact_sensitive_text,
+        unsupported_capability_error, validate_provider_url, CommandError,
+        PublishChangeRequestSummary,
     };
+    use skill_library_core::{AuthMode, ProviderInstance, ProviderKind};
     use std::path::Path;
 
     #[test]
@@ -6107,6 +6675,113 @@ mod tests {
 
         assert_eq!(value["code"], "missing_github_token");
         assert_eq!(value["message"], "GitHub token is required");
+    }
+
+    #[test]
+    fn webdav_change_request_error_is_explicit_about_direct_upload() {
+        let instance = ProviderInstance {
+            id: "webdav-company".to_owned(),
+            kind: ProviderKind::WebDav,
+            display_name: "Company WebDAV".to_owned(),
+            web_base_url: "https://dav.example.test/skills".to_owned(),
+            api_base_url: "https://dav.example.test/skills".to_owned(),
+            auth_modes: vec![AuthMode::Basic],
+            enabled: true,
+        };
+
+        let error = unsupported_capability_error(
+            "change_requests_unsupported",
+            "change requests",
+            &instance,
+        );
+
+        assert_eq!(error.code(), "change_requests_unsupported");
+        assert!(error.message().contains("WebDAV source"));
+        assert!(error
+            .message()
+            .contains("direct upload requires explicit confirmation"));
+    }
+
+    #[test]
+    fn webdav_discussions_status_is_unsupported() {
+        let instance = ProviderInstance {
+            id: "webdav-company".to_owned(),
+            kind: ProviderKind::WebDav,
+            display_name: "Company WebDAV".to_owned(),
+            web_base_url: "https://dav.example.test/skills".to_owned(),
+            api_base_url: "https://dav.example.test/skills".to_owned(),
+            auth_modes: vec![AuthMode::Basic],
+            enabled: true,
+        };
+
+        let status = discussions_status_for_provider(&instance, false, false, Vec::new());
+
+        assert!(!status.supported);
+        assert!(!status.enabled);
+        assert_eq!(status.provider_id, "webdav-company");
+        assert_eq!(status.provider_kind, "webdav");
+    }
+
+    #[test]
+    fn webdav_workspace_parser_accepts_provider_single_segment_path() {
+        let instances = vec![ProviderInstance {
+            id: "webdav-main".to_owned(),
+            kind: ProviderKind::WebDav,
+            display_name: "WebDAV".to_owned(),
+            web_base_url: "https://dav.example.test".to_owned(),
+            api_base_url: "https://dav.example.test/files/user".to_owned(),
+            auth_modes: vec![AuthMode::Basic],
+            enabled: true,
+        }];
+
+        let workspace = parse_workspace_with_instances("webdav-main/images", &instances).unwrap();
+
+        assert_eq!(workspace.provider, "webdav-main");
+        assert_eq!(workspace.owner, "");
+        assert_eq!(workspace.repo, "images");
+        assert_eq!(workspace.remote_id.as_deref(), Some("images"));
+    }
+
+    #[test]
+    fn webdav_workspace_parser_preserves_nested_remote_path() {
+        let instances = vec![ProviderInstance {
+            id: "webdav-main".to_owned(),
+            kind: ProviderKind::WebDav,
+            display_name: "WebDAV".to_owned(),
+            web_base_url: "https://dav.example.test".to_owned(),
+            api_base_url: "https://dav.example.test/files/user".to_owned(),
+            auth_modes: vec![AuthMode::Basic],
+            enabled: true,
+        }];
+
+        let workspace =
+            parse_workspace_with_instances("webdav-main/chatgpt2api/images", &instances).unwrap();
+
+        assert_eq!(workspace.provider, "webdav-main");
+        assert_eq!(workspace.owner, "chatgpt2api");
+        assert_eq!(workspace.repo, "images");
+        assert_eq!(workspace.remote_id.as_deref(), Some("chatgpt2api/images"));
+    }
+
+    #[test]
+    fn provider_url_validation_rejects_non_http_urls() {
+        assert!(validate_provider_url("api_base_url", "https://dav.example.test/skills").is_ok());
+        let error = validate_provider_url("api_base_url", "file:///tmp/skills").unwrap_err();
+
+        assert_eq!(error.code(), "invalid_provider_url");
+    }
+
+    #[test]
+    fn pull_request_summary_maps_to_change_request_summary() {
+        let summary = PublishChangeRequestSummary::from(skill_library_provider::PullRequest {
+            number: 7,
+            title: "Import skill".to_owned(),
+            html_url: "https://github.com/acme/skills/pull/7".to_owned(),
+            state: "open".to_owned(),
+        });
+
+        assert_eq!(summary.number, 7);
+        assert_eq!(summary.provider_kind, "pull_request");
     }
 
     #[test]

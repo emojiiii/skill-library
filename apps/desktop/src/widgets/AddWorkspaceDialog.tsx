@@ -1,7 +1,13 @@
-import { Button, Input, Modal, Spinner } from "@heroui/react";
+import { Button, Input, Label, ListBox, Modal, Select, Spinner } from "@heroui/react";
 import { Plus, Search } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { Workspace } from "../lib/skill-library";
+import type { ProviderInstance, Workspace } from "../lib/skill-library";
+import {
+  providerIsWebDav,
+  workspaceKey,
+  workspaceProviderLabel,
+  workspaceProviderShortLabel,
+} from "../lib/providers";
 import { workspaceColor, workspaceInitials } from "../utils/workspace-visual";
 import { Pill } from "../widgets/Pill";
 import { useLocale } from "../hooks/useLocale";
@@ -12,6 +18,9 @@ export function AddWorkspaceDialog({
   remote,
   remoteFetching,
   remoteEnabled,
+  providers,
+  selectedProviderId,
+  onProviderChange,
   query,
   setQuery,
   onAddRemote,
@@ -26,6 +35,9 @@ export function AddWorkspaceDialog({
   remote: Workspace[];
   remoteFetching: boolean;
   remoteEnabled: boolean;
+  providers: ProviderInstance[];
+  selectedProviderId: string;
+  onProviderChange: (providerId: string) => void;
   query: string;
   setQuery: (value: string) => void;
   onAddRemote: (workspace: Workspace) => void;
@@ -36,7 +48,13 @@ export function AddWorkspaceDialog({
   manualPending: boolean;
 }) {
   const { t } = useLocale();
-  const [tab, setTab] = useState<"github" | "manual">("github");
+  const [tab, setTab] = useState<"remote" | "manual">("remote");
+  const hasProviders = providers.length > 0;
+  const selectedProvider = providers.find((provider) => provider.id === selectedProviderId);
+  const selectedProviderLabel = hasProviders
+    ? selectedProvider?.displayName ?? workspaceProviderLabel(selectedProviderId)
+    : t("workspace.add.noProviders.label");
+  const isWebDav = hasProviders && providerIsWebDav(selectedProvider);
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -46,9 +64,9 @@ export function AddWorkspaceDialog({
 
   useEffect(() => {
     if (open) {
-      setTab(remoteEnabled ? "github" : "manual");
+      setTab(hasProviders && remoteEnabled ? "remote" : "manual");
     }
-  }, [open, remoteEnabled]);
+  }, [hasProviders, open, remoteEnabled]);
 
   return (
     <Modal isOpen={open} onOpenChange={onOpenChange}>
@@ -59,23 +77,77 @@ export function AddWorkspaceDialog({
             <Modal.Header className="border-b border-[var(--line)] px-5 py-4">
               <Modal.Heading className="text-[15px] font-semibold tracking-tight">{t("workspace.add.title")}</Modal.Heading>
               <div className="mt-1 text-[12px] text-[var(--fg-muted)]">
-                {t("workspace.add.desc")}
+                {hasProviders
+                  ? t("workspace.add.desc").replace("{provider}", selectedProviderLabel)
+                  : t("workspace.add.noProviders.desc")}
               </div>
             </Modal.Header>
 
-            <div className="border-b border-[var(--line)] px-5">
-              <div className="flex gap-4">
-                <TabButton active={tab === "github"} onClick={() => setTab("github")}>
-                  {t("workspace.add.fromGithub")}
-                </TabButton>
-                <TabButton active={tab === "manual"} onClick={() => setTab("manual")}>
-                  {t("workspace.add.manual")}
-                </TabButton>
-              </div>
+            <div className="border-b border-[var(--line)] px-5 py-3">
+              {hasProviders ? (
+                <div className="grid grid-cols-[1fr_auto] items-end gap-2">
+                  <Select
+                    value={selectedProviderId}
+                    onChange={(value) => {
+                      if (typeof value === "string" || typeof value === "number") {
+                        onProviderChange(String(value));
+                      }
+                    }}
+                    variant="secondary"
+                    fullWidth
+                    aria-label={t("workspace.add.provider")}
+                  >
+                    <Label>{t("workspace.add.provider")}</Label>
+                    <Select.Trigger>
+                      <Select.Value />
+                      <Select.Indicator />
+                    </Select.Trigger>
+                    <Select.Popover>
+                      <ListBox>
+                        {providers.map((provider) => (
+                          <ListBox.Item key={provider.id} id={provider.id} textValue={provider.displayName}>
+                            {provider.displayName}
+                            <ListBox.ItemIndicator />
+                          </ListBox.Item>
+                        ))}
+                      </ListBox>
+                    </Select.Popover>
+                  </Select>
+                  <span className="workspace-provider-badge workspace-provider-badge--select">
+                    {workspaceProviderShortLabel(selectedProviderId)}
+                  </span>
+                </div>
+              ) : (
+                <div>
+                  <div className="text-[11.5px] font-medium text-[var(--fg)]">
+                    {t("workspace.add.provider")}
+                  </div>
+                  <div className="mt-1.5 rounded-md border border-dashed border-[var(--line)] px-3 py-3 text-[12.5px] text-[var(--fg-muted)]">
+                    {t("workspace.add.noProviders.label")}
+                  </div>
+                </div>
+              )}
             </div>
 
+            {hasProviders ? (
+              <div className="border-b border-[var(--line)] px-5">
+                <div className="flex gap-4">
+                  <TabButton active={tab === "remote"} onClick={() => setTab("remote")}>
+                    {t("workspace.add.fromProvider")}
+                  </TabButton>
+                  <TabButton active={tab === "manual"} onClick={() => setTab("manual")}>
+                    {t("workspace.add.manual")}
+                  </TabButton>
+                </div>
+              </div>
+            ) : null}
+
             <Modal.Body className="px-5 py-4">
-              {tab === "github" ? (
+              {!hasProviders ? (
+                <div className="rounded-md border border-dashed border-[var(--line)] px-4 py-6 text-center text-[12.5px] text-[var(--fg-muted)]">
+                  {t("workspace.add.noProviders.hint")}
+                </div>
+              ) : tab === "remote" ? (
                 remoteEnabled ? (
                   <div className="space-y-3">
                     <div className="relative">
@@ -84,7 +156,7 @@ export function AddWorkspaceDialog({
                         autoFocus
                         value={query}
                         onChange={(event) => setQuery(event.target.value)}
-                        placeholder={t("workspace.add.searchPlaceholder")}
+                        placeholder={t("workspace.add.searchPlaceholder").replace("{provider}", selectedProviderLabel)}
                         className="w-full rounded-md border border-[var(--line)] bg-[var(--bg-elevated)] py-2 pl-8 pr-3 text-[13px] outline-none focus:border-[var(--brand)] focus:ring-2 focus:ring-[var(--brand-soft)]"
                       />
                     </div>
@@ -94,9 +166,9 @@ export function AddWorkspaceDialog({
                       ) : filtered.length ? (
                         filtered.map((ws) => (
                           <RemoteRow
-                            key={ws.full_name}
+                            key={`${ws.provider}:${ws.full_name}`}
                             workspace={ws}
-                            adding={isAddingFullName === ws.full_name}
+                            adding={isAddingFullName === workspaceKey(ws)}
                             onAdd={() => onAddRemote(ws)}
                           />
                         ))
@@ -109,15 +181,19 @@ export function AddWorkspaceDialog({
                   </div>
                 ) : (
                   <div className="rounded-md border border-dashed border-[var(--line)] px-4 py-6 text-center text-[12.5px] text-[var(--fg-muted)]">
-                    {t("workspace.add.signInRequired")}
+                    {t("workspace.add.signInRequired").replace("{provider}", selectedProviderLabel)}
                   </div>
                 )
               ) : (
                 <div className="space-y-3">
                   <div>
-                    <div className="text-[11.5px] font-medium text-[var(--fg)]">{t("workspace.add.manualLabel")}</div>
+                    <div className="text-[11.5px] font-medium text-[var(--fg)]">
+                      {isWebDav ? t("workspace.add.remoteDirectory") : t("workspace.add.manualLabel")}
+                    </div>
                     <div className="mt-0.5 text-[11px] text-[var(--fg-muted)]">
-                      {t("workspace.add.manualHint")}
+                      {isWebDav
+                        ? t("workspace.add.remoteDirectoryHint")
+                        : t("workspace.add.manualHint").replace("{provider}", selectedProviderLabel)}
                     </div>
                   </div>
                   <div className="grid grid-cols-[1fr_auto] gap-2">
@@ -125,7 +201,7 @@ export function AddWorkspaceDialog({
                       aria-label={t("workspace.add.pathAria")}
                       value={manualPath}
                       onChange={(event) => setManualPath(event.target.value)}
-                      placeholder={t("workspace.add.pathPlaceholder")}
+                      placeholder={isWebDav ? t("workspace.add.remoteDirectoryPlaceholder") : t("workspace.add.pathPlaceholder")}
                       variant="secondary"
                     />
                     <Button onPress={onAddManual} isDisabled={!manualPath.trim() || manualPending}>
@@ -202,7 +278,12 @@ function RemoteRow({
         {initials}
       </span>
       <div className="min-w-0 flex-1">
-        <div className="truncate text-[13px] font-medium">{workspace.full_name}</div>
+        <div className="flex min-w-0 items-center gap-2">
+          <div className="truncate text-[13px] font-medium">{workspace.full_name}</div>
+          <span className="workspace-provider-badge is-small">
+            {workspaceProviderShortLabel(workspace.provider)}
+          </span>
+        </div>
         <div className="truncate text-[11px] text-[var(--fg-muted)]">
           {workspace.visibility} · {workspace.permission} · {workspace.default_branch}
         </div>

@@ -274,7 +274,7 @@ export function SyncSkillModal({
                     {result.autoMerge?.merged ? t("sync.prAutoMerged") : t("sync.prOpened")}
                   </div>
                   <div className="mt-0.5 truncate text-[11.5px] opacity-80">
-                    #{result.pullRequest.number} · {result.pullRequest.title}
+                    #{result.changeRequest.number} · {result.changeRequest.title}
                   </div>
                   {result.autoMerge?.error ? (
                     <div className="mt-1 rounded border border-[var(--warning)] bg-[var(--warning-soft)] px-2 py-1 text-[11.5px] text-[var(--warning)]">
@@ -283,7 +283,7 @@ export function SyncSkillModal({
                   ) : null}
                   <button
                     type="button"
-                    onClick={() => void openExternalUrl(result.pullRequest.htmlUrl)}
+                    onClick={() => void openExternalUrl(result.changeRequest.htmlUrl)}
                     className="mt-2 inline-flex items-center gap-1 text-[12px] font-medium underline"
                   >
                     <ExternalLink size={12} />

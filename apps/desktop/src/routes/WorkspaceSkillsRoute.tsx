@@ -16,7 +16,7 @@ import {
   onScanProgress,
   publishWorkspaceSkillUpdate,
   readSubscriptions,
-  scanGithubWorkspaceStreaming,
+  scanRemoteWorkspaceStreaming,
   scanWorkspace,
   type SkillAsset,
   subscribeWorkspaceSkill,
@@ -34,6 +34,7 @@ import { SyncSkillModal } from "../widgets/SyncSkillModal";
 import { useWorkspace } from "../context/WorkspaceContext";
 import { useAppStore } from "../state/appStore";
 import { formatError, openExternalUrl } from "../utils/format";
+import { workspaceKey, workspaceMatchesSelection } from "../lib/providers";
 
 // Lazy-loaded: SkillDetail pulls in the heavy editor stack (MDXEditor/ProseMirror
 // + CodeMirror with 10 language packs, ~2MB). Keeping it out of the startup
@@ -41,7 +42,7 @@ import { formatError, openExternalUrl } from "../utils/format";
 // editor chunk is only fetched when the detail modal is actually opened.
 const SkillDetail = lazy(() => import("../widgets/SkillDetail").then((m) => ({ default: m.SkillDetail })));
 
-type ScanRequest = { kind: "local" | "github"; value: string };
+type ScanRequest = { kind: "local" | "remote"; value: string };
 
 const publishRoles = new Set(["admin", "maintain", "write"]);
 const EMPTY_ASSETS: SkillAsset[] = [];
@@ -49,6 +50,22 @@ const EMPTY_ASSETS: SkillAsset[] = [];
 function resolveSelectedSource(workspace: string, selected: SkillAsset | null) {
   if (!selected || workspace === "demo") return "demo";
   return `${workspace.replace(/\/$/, "")}/${selected.path}`;
+}
+
+function scanResultWorkspaceKey(
+  result: { workspace: Workspace | null | undefined },
+  fallback: string,
+) {
+  return result.workspace ? workspaceKey(result.workspace) : fallback;
+}
+
+function scanResultMatchesSelection(
+  result: { workspace: Workspace | null | undefined },
+  fallback: string,
+  selection: string,
+) {
+  if (result.workspace) return workspaceMatchesSelection(result.workspace, selection);
+  return fallback === selection;
 }
 
 export function WorkspaceSkillsRoute() {
@@ -136,7 +153,7 @@ export function WorkspaceSkillsRoute() {
           const detail = await getWorkspaceDetail({ workspace: request.value });
           return { workspace: detail.workspace, skills: detail.skills, detail, fromCache: false };
         } catch {
-          const fallback = await scanGithubWorkspaceStreaming({ workspace: request.value });
+          const fallback = await scanRemoteWorkspaceStreaming({ workspace: request.value });
           return { workspace: fallback.workspace, skills: fallback.skills, detail: null, fromCache: false };
         }
       } finally {
@@ -148,8 +165,8 @@ export function WorkspaceSkillsRoute() {
       }
     },
     onSuccess: (result, request) => {
-      const wsName = result.workspace?.full_name ?? request.value;
-      if (wsName !== activeWorkspaceRef.current) return;
+      const wsName = scanResultWorkspaceKey(result, request.value);
+      if (!scanResultMatchesSelection(result, request.value, activeWorkspaceRef.current)) return;
       setStreamingSkills([]); // Clear streaming state, final result is authoritative
       setDemoWorkspaceDetail(result.workspace ? null : result.detail);
       // Restore persisted skill or fall back to first
@@ -215,7 +232,7 @@ export function WorkspaceSkillsRoute() {
       });
     }
 
-    scan.mutate({ kind: "github", value: workspace });
+    scan.mutate({ kind: "remote", value: workspace });
 
     return () => {
       cancelled = true;
@@ -338,14 +355,15 @@ export function WorkspaceSkillsRoute() {
       const publishedDraft = publishDraft;
       setPublishDraft(null);
       setPublishReset((current) => ({ key: current.key + 1, value: publishedDraft?.after ?? null }));
+      const changeRequest = result.changeRequest ?? result.pullRequest;
       if (result.autoMerge?.merged) {
         const mergedKey = result.autoMerge.deletedBranch
           ? "publish.toastAutoMergedDeletedBranch"
           : "publish.toastAutoMerged";
         toast.success(
           t(mergedKey)
-            .replace("{title}", result.pullRequest.title)
-            .replace("{number}", String(result.pullRequest.number)),
+            .replace("{title}", changeRequest.title)
+            .replace("{number}", String(changeRequest.number)),
         );
       } else {
         if (result.autoMerge?.error) {
@@ -353,13 +371,13 @@ export function WorkspaceSkillsRoute() {
         } else {
           toast.success(
             t("publish.toastCreated")
-              .replace("{title}", result.pullRequest.title)
-              .replace("{number}", String(result.pullRequest.number)),
+              .replace("{title}", changeRequest.title)
+              .replace("{number}", String(changeRequest.number)),
           );
         }
-        void openExternalUrl(result.pullRequest.htmlUrl);
+        void openExternalUrl(changeRequest.htmlUrl);
       }
-      void scan.mutate({ kind: "github", value: workspace });
+      void scan.mutate({ kind: "remote", value: workspace });
       queryClient.invalidateQueries({ queryKey: ["workspace-scan", workspace] });
       queryClient.invalidateQueries({ queryKey: ["skill-detail", workspace, selected?.path, selectedRef] });
       queryClient.invalidateQueries({ queryKey: ["skill-file-content", workspace] });
@@ -379,8 +397,12 @@ export function WorkspaceSkillsRoute() {
   }, [selected?.manifest.id, selectedRef, selectedFile]);
 
   // --- Derived: assets with filter ---
-  const scanDataWorkspace = scan.data?.workspace?.full_name ?? (scan.data && workspace === "demo" ? "demo" : "");
-  const currentAssets = scanDataWorkspace === workspace ? scan.data?.skills ?? EMPTY_ASSETS : EMPTY_ASSETS;
+  const scanDataMatchesWorkspace = scan.data
+    ? scan.data.workspace
+      ? workspaceMatchesSelection(scan.data.workspace, workspace)
+      : workspace === "demo"
+    : false;
+  const currentAssets = scanDataMatchesWorkspace ? scan.data?.skills ?? EMPTY_ASSETS : EMPTY_ASSETS;
   if (currentAssets.length > 0) prevAssetsRef.current = currentAssets;
   // During streaming, show incrementally discovered skills; once scan completes, use final result
   const assets = currentAssets.length > 0

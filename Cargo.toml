@@ -7,6 +7,9 @@ members = [
   "crates/skill-library-manifest",
   "crates/skill-library-provider",
   "crates/skill-library-provider-github",
+  "crates/skill-library-provider-gitlab",
+  "crates/skill-library-provider-gitee",
+  "crates/skill-library-provider-webdav",
   "crates/skill-library-publish",
   "crates/skill-library-sync",
 ]
@@ -31,6 +34,8 @@ futures = "0.3"
 globset = "0.4"
 hex = "0.4"
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native-sync-persistent", "crypto-rust"] }
+percent-encoding = "2"
+quick-xml = "0.39"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 semver = { version = "1", features = ["serde"] }

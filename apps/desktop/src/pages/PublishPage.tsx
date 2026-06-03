@@ -1,4 +1,4 @@
-import { AlertDialog, Button, Spinner, toast } from "@heroui/react";
+import { AlertDialog, Button, Drawer, Spinner, toast } from "@heroui/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ExternalLink,
@@ -37,6 +37,7 @@ export function PublishPage({ workspaceRef }: { workspaceRef: string }) {
   const queryClient = useQueryClient();
   const [state, setState] = useState<PullRequestQueryState>("open");
   const [selectedNumber, setSelectedNumber] = useState<number | null>(null);
+  const [detailOpen, setDetailOpen] = useState(false);
 
   const stateOptions: Array<{ id: PullRequestQueryState; label: string }> = [
     { id: "open", label: t("publishPage.stateOpen") },
@@ -53,14 +54,20 @@ export function PublishPage({ workspaceRef }: { workspaceRef: string }) {
 
   const prs = query.data ?? EMPTY_PRS;
   const selected = useMemo(
-    () => prs.find((pr) => pr.number === selectedNumber) ?? prs[0] ?? null,
+    () => prs.find((pr) => pr.number === selectedNumber) ?? null,
     [prs, selectedNumber],
   );
 
   useEffect(() => {
-    if (!selected && selectedNumber !== null) setSelectedNumber(null);
-    if (!selectedNumber && prs[0]) setSelectedNumber(prs[0].number);
+    if (selected || selectedNumber === null) return;
+    setSelectedNumber(null);
+    setDetailOpen(false);
   }, [prs, selected, selectedNumber]);
+
+  const closeDetail = (open: boolean) => {
+    setDetailOpen(open);
+    if (!open) setSelectedNumber(null);
+  };
 
   const open = prs.filter((pr) => pr.state === "open" && !pr.merged).length;
   const merged = prs.filter((pr) => pr.merged).length;
@@ -148,6 +155,7 @@ export function PublishPage({ workspaceRef }: { workspaceRef: string }) {
                 onChange={(next) => {
                   setState(next);
                   setSelectedNumber(null);
+                  setDetailOpen(false);
                 }}
               />
               <Button
@@ -170,29 +178,20 @@ export function PublishPage({ workspaceRef }: { workspaceRef: string }) {
           ) : null}
 
           {prs.length ? (
-            <div className="grid min-h-0 flex-1 lg:grid-cols-[420px_minmax(0,1fr)]">
-              <div className="min-h-0 border-r border-[var(--line)]">
-                <div className="divide-y divide-[var(--line)]">
-                  {prs.map((pr) => (
-                    <PullRequestRow
-                      key={pr.number}
-                      pr={pr}
-                      selected={selected?.number === pr.number}
-                      onSelect={() => setSelectedNumber(pr.number)}
-                    />
-                  ))}
-                </div>
+            <div className="min-h-0 flex-1">
+              <div className="divide-y divide-[var(--line)]">
+                {prs.map((pr) => (
+                  <PullRequestRow
+                    key={pr.number}
+                    pr={pr}
+                    selected={detailOpen && selected?.number === pr.number}
+                    onSelect={() => {
+                      setSelectedNumber(pr.number);
+                      setDetailOpen(true);
+                    }}
+                  />
+                ))}
               </div>
-              <PullRequestDetail
-                workspaceRef={workspaceRef}
-                pr={selected}
-                mergePending={mergeMutation.isPending}
-                closePending={closeMutation.isPending}
-                commentPending={commentMutation.isPending}
-                onMerge={(pr) => mergeMutation.mutate(pr)}
-                onClose={(input) => closeMutation.mutate(input)}
-                onComment={(input) => commentMutation.mutate(input)}
-              />
             </div>
           ) : query.isFetching ? (
             <div className="empty-state">
@@ -206,6 +205,26 @@ export function PublishPage({ workspaceRef }: { workspaceRef: string }) {
             </div>
           )}
         </Card>
+
+        <Drawer.Backdrop isOpen={detailOpen && Boolean(selected)} onOpenChange={closeDetail} variant="blur">
+          <Drawer.Content placement="right" className="publish-pr-drawer__content">
+            <Drawer.Dialog className="publish-pr-drawer" aria-label={selected?.title ?? t("publishPage.selectPr")}>
+              <Drawer.CloseTrigger />
+              {selected ? (
+                <PullRequestDetail
+                  workspaceRef={workspaceRef}
+                  pr={selected}
+                  mergePending={mergeMutation.isPending}
+                  closePending={closeMutation.isPending}
+                  commentPending={commentMutation.isPending}
+                  onMerge={(pr) => mergeMutation.mutate(pr)}
+                  onClose={(input) => closeMutation.mutate(input)}
+                  onComment={(input) => commentMutation.mutate(input)}
+                />
+              ) : null}
+            </Drawer.Dialog>
+          </Drawer.Content>
+        </Drawer.Backdrop>
       </div>
     </section>
   );
@@ -315,9 +334,9 @@ function PullRequestDetail({
   const body = pr.body?.trim();
 
   return (
-    <div className="flex min-h-0 flex-col">
-      <div className="border-b border-[var(--line)] px-5 py-4">
-        <div className="flex items-start justify-between gap-4">
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="border-b border-[var(--line)] px-5 py-4 pr-14">
+        <div className="flex items-start justify-between gap-5">
           <div className="min-w-0">
             <div className="flex min-w-0 items-center gap-2">
               {pr.merged ? (
@@ -341,7 +360,7 @@ function PullRequestDetail({
               <span>{formatRelativeTime(pr.updated_at)}</span>
             </div>
           </div>
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="flex shrink-0 items-center gap-2 pr-1">
             <Button
               isIconOnly
               size="sm"
@@ -459,7 +478,7 @@ function PullRequestDetail({
         ) : null}
       </div>
 
-      <div className="grid min-h-0 flex-1 lg:grid-cols-[minmax(0,1fr)_320px]">
+      <div className="grid min-h-0 flex-1 grid-cols-1 xl:grid-cols-[minmax(0,1fr)_340px]">
         <div className="min-h-0 overflow-y-auto bg-[var(--bg-soft)] px-4 py-3">
           {filesQuery.isFetching && !files.length ? (
             <div className="flex items-center justify-center gap-2 rounded-md border border-[var(--line)] bg-[var(--bg-elevated)] px-4 py-10 text-[12px] text-[var(--fg-muted)]">
@@ -483,7 +502,7 @@ function PullRequestDetail({
           )}
         </div>
 
-        <aside className="flex min-h-0 flex-col border-l border-[var(--line)] bg-[var(--bg-elevated)]">
+        <aside className="flex min-h-0 flex-col border-t border-[var(--line)] bg-[var(--bg-elevated)] xl:border-l xl:border-t-0">
           <div className="border-b border-[var(--line)] px-4 py-3">
             <div className="text-[12px] font-semibold text-[var(--fg)]">{t("publishPage.comments")}</div>
             <div className="mt-0.5 text-[11.5px] text-[var(--fg-muted)]">{t("publishPage.commentsDesc")}</div>

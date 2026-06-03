@@ -1,0 +1,24 @@
+[package]
+name = "skill-library-provider-gitee"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+flate2.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
+skill-library-core = { path = "../skill-library-core" }
+skill-library-provider = { path = "../skill-library-provider" }
+tracing.workspace = true
+
+[dev-dependencies]
+mockito = "1"
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }

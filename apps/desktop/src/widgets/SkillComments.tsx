@@ -14,6 +14,7 @@ import {
   removeDiscussionReaction,
   type DiscussionComment,
   type DiscussionInfo,
+  type DiscussionsStatus,
   type ReactionGroup,
 } from "../lib/skill-library";
 import {
@@ -23,6 +24,7 @@ import {
   setDiscussionMappingCache,
   clearDiscussionMappingCache,
 } from "../lib/workspaceCache";
+import { githubRepoPath, workspaceProviderId } from "../lib/providers";
 import { formatError, formatRelativeTime } from "../utils/format";
 
 // GitHub reaction content → emoji mapping
@@ -38,6 +40,22 @@ const REACTION_EMOJI: Record<string, string> = {
 };
 
 const ALL_REACTIONS = Object.keys(REACTION_EMOJI);
+
+function defaultDiscussionStatus(
+  workspace: string,
+  enabled: boolean,
+  discussions: DiscussionInfo[],
+): DiscussionsStatus {
+  const providerId = workspaceProviderId(workspace);
+  return {
+    enabled,
+    supported: providerId === "github.com" || providerId === "github",
+    providerId,
+    providerName: providerId === "github.com" || providerId === "github" ? "GitHub" : providerId,
+    providerKind: providerId === "github.com" || providerId === "github" ? "github" : providerId,
+    discussions,
+  };
+}
 
 /** Emoji picker rendered via portal to avoid overflow clipping */
 function EmojiPickerPortal({
@@ -527,7 +545,7 @@ export function SkillComments({
       if (cached) {
         // Negative cache: we previously confirmed no discussion exists
         if (cached.discussionId === null) {
-          return { enabled: true, discussions: [] };
+          return defaultDiscussionStatus(workspace, true, []);
         }
 
         // Positive cache: fetch single discussion by number
@@ -536,7 +554,7 @@ export function SkillComments({
           discussionNumber: cached.discussionNumber!,
         });
         if (info) {
-          return { enabled: true, discussions: [info] };
+          return defaultDiscussionStatus(workspace, true, [info]);
         }
         // Cached mapping is stale (discussion deleted?) — clear and fall through
         void clearDiscussionMappingCache(workspace, skillId);
@@ -641,6 +659,8 @@ export function SkillComments({
 
   // Determine effective enabled state
   const effectiveEnabled = discussions.data ? discussions.data.enabled : cachedEnabled;
+  const effectiveSupported = discussions.data?.supported ?? true;
+  const providerName = discussions.data?.providerName ?? defaultDiscussionStatus(workspace, true, []).providerName;
 
   // Still loading and no cache
   if (effectiveEnabled === null && discussions.isLoading) {
@@ -651,8 +671,19 @@ export function SkillComments({
     );
   }
 
+  if (!effectiveSupported) {
+    return (
+      <div className="empty-state">
+        <div className="empty-state__title">{t("discussion.unsupported.title")}</div>
+        <div className="text-center">
+          <p>{t("discussion.unsupported.desc").replace("{provider}", providerName)}</p>
+        </div>
+      </div>
+    );
+  }
+
   if (effectiveEnabled === false) {
-    const settingsUrl = `https://github.com/${workspace}/settings`;
+    const settingsUrl = `https://github.com/${githubRepoPath(workspace)}/settings`;
     return (
       <div className="empty-state">
         <div className="empty-state__title">{t("discussion.notEnabled.title")}</div>

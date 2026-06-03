@@ -1,20 +1,19 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useLocale } from "../hooks/useLocale";
 import { useTheme } from "../hooks/useTheme";
 import {
   addWorkspace,
-  appInit,
   type DeepLinkPayload,
   exportDiagnostics,
   getAuthStatus,
   getDeepLinkState,
   installSkill,
   removeSkill,
-  listGithubWorkspaces,
-  listLocalAgentRoots,
+  listProviderInstances,
+  listProviderWorkspaces,
   listWorkspaces,
   loginGithubToken,
   logoutGithub,
@@ -22,7 +21,7 @@ import {
   openLogsFolder,
   pollGithubDeviceFlow,
   previewPublish,
-  readSubscriptions,
+  type ProviderInstance,
   type Workspace,
   startGithubDeviceFlow,
   subscribeWorkspaceSkill,
@@ -37,6 +36,42 @@ import { PushModal } from "../widgets/PushModal";
 import { formatError, openExternalUrl } from "../utils/format";
 import { type AppPage } from "../utils/navigation";
 import { useAppStore } from "../state/appStore";
+import {
+  workspaceInputForProvider,
+  workspaceKey,
+  workspaceMatchesSelection,
+  workspaceProviderLabel,
+} from "../lib/providers";
+
+const defaultWorkspaceProviders: ProviderInstance[] = [
+  {
+    id: "github.com",
+    kind: "git-hub",
+    displayName: "GitHub",
+    webBaseUrl: "https://github.com",
+    apiBaseUrl: "https://api.github.com",
+    authModes: ["personal_access_token", "device_flow"],
+    enabled: true,
+  },
+  {
+    id: "gitlab.com",
+    kind: "git-lab",
+    displayName: "GitLab.com",
+    webBaseUrl: "https://gitlab.com",
+    apiBaseUrl: "https://gitlab.com/api/v4",
+    authModes: ["personal_access_token"],
+    enabled: true,
+  },
+  {
+    id: "gitee.com",
+    kind: "gitee",
+    displayName: "Gitee",
+    webBaseUrl: "https://gitee.com",
+    apiBaseUrl: "https://gitee.com/api/v5",
+    authModes: ["personal_access_token"],
+    enabled: true,
+  },
+];
 
 /**
  * Root layout — rendered by the root route.
@@ -47,6 +82,7 @@ export function RootLayout() {
   useTheme();
   const { t } = useLocale();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
 
   // --- Global UI state from zustand ---
   const settingsOpen = useAppStore((s) => s.settingsOpen);
@@ -81,7 +117,7 @@ export function RootLayout() {
   // persists across personal pages (discover / my-skills / ...).
   const selectedWorkspace = useAppStore((s) => s.selectedWorkspace);
   const setSelectedWorkspace = useAppStore((s) => s.setSelectedWorkspace);
-  const workspaceRef = selectedWorkspace ?? "";
+  const [workspaceProviderId, setWorkspaceProviderId] = useState("github.com");
 
   // --- Local state (auth device flow, deep links) ---
   const [githubDevice, setGithubDevice] = useState<GitHubDeviceStartResult | null>(null);
@@ -89,20 +125,45 @@ export function RootLayout() {
   const [deepLink, setDeepLink] = useState<DeepLinkPayload | null>(null);
 
   // --- Queries (global) ---
-  useQuery({ queryKey: ["init"], queryFn: appInit });
   const initialDeepLink = useQuery({ queryKey: ["deep-link-state"], queryFn: getDeepLinkState });
-  const subscriptions = useQuery({ queryKey: ["subscriptions"], queryFn: readSubscriptions, staleTime: 60 * 1000 });
-  const localAgents = useQuery({ queryKey: ["local-agents"], queryFn: listLocalAgentRoots, staleTime: 60 * 1000 });
   const workspaces = useQuery({ queryKey: ["workspaces"], queryFn: listWorkspaces, staleTime: 2 * 60 * 1000 });
   const auth = useQuery({ queryKey: ["auth-status"], queryFn: getAuthStatus });
-  const githubRepos = useQuery({
-    queryKey: ["github-workspaces", auth.data?.githubLogin],
-    queryFn: () => listGithubWorkspaces(),
-    enabled: Boolean(auth.data?.githubLogin),
+  const providerInstances = useQuery({ queryKey: ["provider-instances"], queryFn: listProviderInstances, staleTime: 2 * 60 * 1000 });
+  const availableProviderInstances = useMemo(
+    () => (providerInstances.data?.length ? providerInstances.data : defaultWorkspaceProviders)
+      .filter((provider) => provider.enabled !== false),
+    [providerInstances.data],
+  );
+  const providerOptions = useMemo(
+    () => availableProviderInstances.filter((provider) => {
+      const status = auth.data?.providers?.find((entry) => entry.provider === provider.id);
+      return Boolean(status?.authenticated || (provider.id === "github.com" && auth.data?.githubLogin));
+    }),
+    [auth.data?.githubLogin, auth.data?.providers, availableProviderInstances],
+  );
+  const providerOptionIds = useMemo(
+    () => providerOptions.map((provider) => provider.id).join("\n"),
+    [providerOptions],
+  );
+  useEffect(() => {
+    if (!providerOptions.length) return;
+    if (!providerOptions.some((provider) => provider.id === workspaceProviderId)) {
+      setWorkspaceProviderId(providerOptions[0].id);
+    }
+  }, [providerOptionIds, providerOptions, workspaceProviderId]);
+  const selectedProvider = providerOptions.find((provider) => provider.id === workspaceProviderId) ?? providerOptions[0];
+  const selectedProviderStatus = auth.data?.providers?.find((provider) => provider.provider === selectedProvider?.id);
+  const selectedProviderId = selectedProvider?.id ?? "";
+  const selectedProviderRemoteEnabled = Boolean(selectedProviderId);
+  const providerWorkspaces = useQuery({
+    queryKey: ["provider-workspaces", selectedProviderId, selectedProviderStatus?.authenticated, auth.data?.githubLogin],
+    queryFn: () => listProviderWorkspaces(selectedProviderId),
+    enabled: Boolean(addWorkspaceOpen && selectedProviderRemoteEnabled),
     staleTime: 5 * 60 * 1000,
   });
 
-  const workspaceMeta = workspaces.data?.workspaces.find((w) => w.full_name === workspaceRef) ?? null;
+  const workspaceMeta = workspaces.data?.workspaces.find((w) => workspaceMatchesSelection(w, selectedWorkspace)) ?? null;
+  const workspaceRef = workspaceMeta ? workspaceKey(workspaceMeta) : selectedWorkspace ?? "";
 
   // --- Mutations ---
   // Run the pending just-in-time auth action (if any) after a successful login.
@@ -117,7 +178,7 @@ export function RootLayout() {
     onSuccess: () => {
       setGithubToken("");
       auth.refetch();
-      githubRepos.refetch();
+      providerWorkspaces.refetch();
       setAuthDialogOpen(false);
       resumeAuthIntent();
     },
@@ -128,7 +189,7 @@ export function RootLayout() {
     onSuccess: () => {
       setSettingsOpen(false);
       auth.refetch();
-      githubRepos.refetch();
+      providerWorkspaces.refetch();
     },
   });
 
@@ -149,7 +210,7 @@ export function RootLayout() {
         setGithubDevice(null);
         setGithubDeviceStatus(t("device.signedInAs").replace("{login}", result.login.login));
         auth.refetch();
-        githubRepos.refetch();
+        providerWorkspaces.refetch();
         setAuthDialogOpen(false);
         resumeAuthIntent();
         return;
@@ -163,22 +224,23 @@ export function RootLayout() {
   });
 
   const addRemoteWorkspace = useMutation({
-    mutationFn: (workspace: Workspace) => addWorkspace({ workspace: workspace.full_name }),
+    mutationFn: (workspace: Workspace) =>
+      addWorkspace({ workspace: workspaceInputForProvider(workspace.provider, workspace.full_name) }),
     onSuccess: (workspace) => {
       workspaces.refetch();
       setAddWorkspaceOpen(false);
-      setSelectedWorkspace(workspace.full_name);
+      setSelectedWorkspace(workspaceKey(workspace));
       navigate({ to: "/skills" });
     },
   });
 
   const addManualWorkspace = useMutation({
-    mutationFn: (input: string) => addWorkspace({ workspace: input }),
+    mutationFn: (input: string) => addWorkspace({ workspace: workspaceInputForProvider(selectedProviderId, input) }),
     onSuccess: (workspace) => {
       workspaces.refetch();
       setAddWorkspaceOpen(false);
       setManualPath("");
-      setSelectedWorkspace(workspace.full_name);
+      setSelectedWorkspace(workspaceKey(workspace));
       navigate({ to: "/skills" });
     },
   });
@@ -191,7 +253,9 @@ export function RootLayout() {
   const confirmPush = useMutation({
     mutationFn: async () => {
       if (!pushEntry) return null;
-      const target = workspaces.data?.workspaces[0]?.full_name ?? workspaceRef;
+      const target = workspaces.data?.workspaces[0]
+        ? workspaceKey(workspaces.data.workspaces[0])
+        : workspaceRef;
       return previewPublish({
         source: pushEntry.path,
         workspace: target,
@@ -209,7 +273,10 @@ export function RootLayout() {
     mutationFn: async () => {
       if (!deepLink) return null;
       const ws = deepLink.workspace
-        ? `${deepLink.workspace.owner}/${deepLink.workspace.repo}`
+        ? workspaceInputForProvider(
+            deepLink.workspace.provider,
+            `${deepLink.workspace.owner}/${deepLink.workspace.repo}`,
+          )
         : deepLink.query.workspace ?? workspaceRef;
       await subscribeWorkspaceSkill({
         workspace: ws,
@@ -220,7 +287,7 @@ export function RootLayout() {
       return ws;
     },
     onSuccess: (ws) => {
-      subscriptions.refetch();
+      queryClient.invalidateQueries({ queryKey: ["subscriptions"] });
       if (ws) {
         setSelectedWorkspace(ws);
         navigate({ to: "/skills" });
@@ -281,6 +348,13 @@ export function RootLayout() {
 
   // --- Derived ---
   const isAuthenticated = Boolean(auth.data?.githubLogin);
+  const connectedProviders = auth.data?.providers?.filter((provider) => provider.authenticated) ?? [];
+  const isCreatorMode = connectedProviders.length > 0 || isAuthenticated;
+  const accountLabel = auth.data?.githubLogin
+    ? `@${auth.data.githubLogin}`
+    : connectedProviders.length
+      ? t("sidebar.providerConnected").replace("{provider}", workspaceProviderLabel(connectedProviders[0].provider))
+      : null;
 
   const globalError =
     (addRemoteWorkspace.error ? formatError(addRemoteWorkspace.error) : null) ??
@@ -291,9 +365,7 @@ export function RootLayout() {
     (githubDevicePoll.error ? formatError(githubDevicePoll.error) : null);
   const showGlobalError = Boolean(globalError && globalError !== dismissedError);
 
-  const navCounts: Partial<Record<AppPage, number>> = {
-    subscriptions: subscriptions.data?.subscriptions.length,
-  };
+  const navCounts: Partial<Record<AppPage, number>> = {};
 
   // Open the just-in-time auth dialog whenever a gated action sets an intent.
   useEffect(() => {
@@ -340,23 +412,26 @@ export function RootLayout() {
     <div className="app-shell">
       <Sidebar
         current={
-          workspaceRef
-            ? {
-                full_name: workspaceRef,
-                permission: workspaceMeta?.permission ?? "—",
-                visibility: workspaceMeta?.visibility ?? "public",
-              }
-            : null
+          workspaceMeta
+            ? workspaceMeta
+            : workspaceRef
+              ? {
+                  provider: workspaceProviderId,
+                  full_name: workspaceRef,
+                  permission: "—",
+                  visibility: "public",
+                }
+              : null
         }
         saved={workspaces.data?.workspaces ?? []}
         onSelectWorkspace={(workspace) => {
-          setSelectedWorkspace(workspace.full_name);
+          setSelectedWorkspace(workspaceKey(workspace));
           navigate({ to: "/skills" });
         }}
         onOpenAddDialog={() => setAddWorkspaceOpen(true)}
         counts={navCounts}
-        authLogin={auth.data?.githubLogin}
-        isCreatorMode={isAuthenticated}
+        authLogin={accountLabel}
+        isCreatorMode={isCreatorMode}
         onOpenAccount={() => setSettingsOpen(true)}
       />
 
@@ -413,13 +488,20 @@ export function RootLayout() {
       <AddWorkspaceDialog
         open={addWorkspaceOpen}
         onOpenChange={setAddWorkspaceOpen}
-        remote={githubRepos.data ?? []}
-        remoteFetching={githubRepos.isFetching}
-        remoteEnabled={isAuthenticated}
+        remote={providerWorkspaces.data ?? []}
+        remoteFetching={providerWorkspaces.isFetching}
+        remoteEnabled={selectedProviderRemoteEnabled}
+        providers={providerOptions}
+        selectedProviderId={selectedProviderId}
+        onProviderChange={(providerId) => {
+          setWorkspaceProviderId(providerId);
+          setRepoQuery("");
+          setManualPath("");
+        }}
         query={repoQuery}
         setQuery={setRepoQuery}
         onAddRemote={(workspace) => addRemoteWorkspace.mutate(workspace)}
-        isAddingFullName={addRemoteWorkspace.variables?.full_name}
+        isAddingFullName={addRemoteWorkspace.variables ? workspaceKey(addRemoteWorkspace.variables) : undefined}
         manualPath={manualPath}
         setManualPath={setManualPath}
         onAddManual={() => addManualWorkspace.mutate(manualPath.trim())}

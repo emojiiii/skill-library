@@ -2,6 +2,10 @@ import { Check, ChevronsUpDown, Plus, Search } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { StoredWorkspace } from "../lib/skill-library";
 import { useLocale } from "../hooks/useLocale";
+import {
+  workspaceKey,
+  workspaceProviderShortLabel,
+} from "../lib/providers";
 import { workspaceColor, workspaceInitials } from "../utils/workspace-visual";
 
 export function WorkspacePicker({
@@ -10,9 +14,9 @@ export function WorkspacePicker({
   onSelect,
   onOpenAddDialog,
 }: {
-  current: { full_name: string; visibility?: string; permission?: string } | null;
+  current: { provider?: string; full_name: string; visibility?: string; permission?: string } | null;
   saved: StoredWorkspace[];
-  onSelect: (workspace: { full_name: string }) => void;
+  onSelect: (workspace: StoredWorkspace) => void;
   onOpenAddDialog: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -48,6 +52,9 @@ export function WorkspacePicker({
   }, [saved, query]);
 
   const hasCurrent = Boolean(current?.full_name);
+  const currentKey = current?.provider && current.full_name
+    ? workspaceKey({ provider: current.provider, full_name: current.full_name })
+    : current?.full_name;
   const owner = current?.full_name.split("/")[0] ?? "";
   const repo = current?.full_name.split("/")[1] ?? "";
   const triggerColor = hasCurrent
@@ -70,8 +77,15 @@ export function WorkspacePicker({
           {triggerInitials}
         </span>
         <span className="workspace-picker-trigger__text">
-          <span className="workspace-picker-trigger__name">
-            {hasCurrent ? current!.full_name : t("picker.noWorkspaces")}
+          <span className="workspace-picker-trigger__name-row">
+            <span className="workspace-picker-trigger__name">
+              {hasCurrent ? current!.full_name : t("picker.noWorkspaces")}
+            </span>
+            {hasCurrent ? (
+              <span className="workspace-provider-badge is-small">
+                {workspaceProviderShortLabel(current?.provider)}
+              </span>
+            ) : null}
           </span>
           <span className="workspace-picker-trigger__sub">
             {hasCurrent
@@ -105,7 +119,7 @@ export function WorkspacePicker({
             <div className="workspace-popover__list">
               {filtered.length ? (
                 filtered.map((ws) => {
-                  const active = ws.full_name === current?.full_name;
+                  const active = workspaceKey(ws) === currentKey || ws.full_name === currentKey;
                   const color = workspaceColor(ws.full_name);
                   const initials = workspaceInitials({
                     owner: ws.full_name.split("/")[0] ?? "",
@@ -128,7 +142,12 @@ export function WorkspacePicker({
                         {initials}
                       </span>
                       <span className="min-w-0 flex-1">
-                        <span className="workspace-popover__item-name">{ws.full_name}</span>
+                        <span className="workspace-popover__item-name-row">
+                          <span className="workspace-popover__item-name">{ws.full_name}</span>
+                          <span className="workspace-provider-badge is-small">
+                            {workspaceProviderShortLabel(ws.provider)}
+                          </span>
+                        </span>
                         <span className="workspace-popover__item-sub">
                           {ws.permission} &middot; {ws.visibility}
                         </span>

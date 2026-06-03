@@ -1,9 +1,18 @@
-import { Button, Input, Modal, toast } from "@heroui/react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Button, Input, Label, ListBox, Modal, Select, Switch, toast } from "@heroui/react";
 import {
   Database,
   FolderOpen,
+  GitBranch,
+  Github,
+  Gitlab,
+  Globe2,
   LogIn,
   LogOut,
+  Pencil,
+  Plus,
+  Save,
+  Server,
   Settings,
   Shield,
   Sparkles,
@@ -15,16 +24,25 @@ import { type ReactNode, useEffect, useState } from "react";
 import { useLocale } from "../hooks/useLocale";
 import { notifySettingsChanged } from "../hooks/useTheme";
 import {
+  deleteProviderInstance,
   dbCacheStats,
   dbClearCache,
   deleteAiKey,
+  getAuthStatus,
   hasAiKey,
+  listProviderInstances,
+  loginProviderToken,
   openDataDir,
   saveAiKey,
   type CacheSizeInfo,
+  type ProviderAuthStatus,
+  type ProviderInstance,
+  upsertProviderInstance,
+  logoutProvider,
 } from "../lib/skill-library";
 
 type SettingsSection = "general" | "network" | "ai" | "cache" | "account" | "about";
+type ProviderFormKind = "git-hub" | "git-lab" | "gitee" | "web-dav";
 
 const sectionDefs: Array<{ id: SettingsSection; labelKey: string; icon: ReactNode }> = [
   { id: "account", labelKey: "settings.account", icon: <User size={15} /> },
@@ -145,13 +163,13 @@ export function SettingsDialog({
     <Modal isOpen={open} onOpenChange={onOpenChange}>
       <Modal.Backdrop>
         <Modal.Container size="lg">
-          <Modal.Dialog className="mx-auto rounded-[12px] bg-[var(--bg-elevated)] outline-none" style={{ width: 600, maxWidth: 600 }}>
+          <Modal.Dialog className="mx-auto rounded-[12px] bg-[var(--bg-elevated)] outline-none" style={{ width: 820, maxWidth: "92vw" }}>
             <Modal.CloseTrigger />
             <Modal.Header className="border-b border-[var(--line)] px-5 py-4">
               <Modal.Heading className="text-[15px] font-semibold">{t("settings.title")}</Modal.Heading>
             </Modal.Header>
             <Modal.Body className="p-0">
-              <div className="grid h-[480px] grid-cols-[140px_1fr] divide-x divide-[var(--line)]">
+              <div className="grid h-[600px] grid-cols-[156px_1fr] divide-x divide-[var(--line)]">
                 {/* Left nav */}
                 <nav className="flex flex-col gap-0.5 p-3">
                   {sectionDefs.map((s) => (
@@ -204,17 +222,60 @@ function SettingsRow({ label, description, children }: { label: string; descript
   );
 }
 
-function SelectControl({ value, options, onChange }: { value: string; options: Array<{ value: string; label: string }>; onChange: (v: string) => void }) {
+function SettingsField({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <select
+    <div className="settings-field">
+      <span className="settings-field__label">{label}</span>
+      {children}
+    </div>
+  );
+}
+
+function SelectControl({
+  value,
+  options,
+  onChange,
+  label,
+  className,
+  isDisabled,
+}: {
+  value: string;
+  options: Array<{ value: string; label: string }>;
+  onChange: (v: string) => void;
+  label?: string;
+  className?: string;
+  isDisabled?: boolean;
+}) {
+  return (
+    <Select
       value={value}
-      onChange={(e) => onChange(e.target.value)}
-      className="settings-select"
+      onChange={(next) => {
+        if (typeof next === "string" || typeof next === "number") {
+          onChange(String(next));
+        }
+      }}
+      variant="secondary"
+      fullWidth
+      className={className}
+      aria-label={label ?? "Select"}
+      isDisabled={isDisabled}
     >
-      {options.map((opt) => (
-        <option key={opt.value} value={opt.value}>{opt.label}</option>
-      ))}
-    </select>
+      {label ? <Label>{label}</Label> : null}
+      <Select.Trigger>
+        <Select.Value />
+        <Select.Indicator />
+      </Select.Trigger>
+      <Select.Popover>
+        <ListBox>
+          {options.map((opt) => (
+            <ListBox.Item key={opt.value} id={opt.value} textValue={opt.label}>
+              {opt.label}
+              <ListBox.ItemIndicator />
+            </ListBox.Item>
+          ))}
+        </ListBox>
+      </Select.Popover>
+    </Select>
   );
 }
 
@@ -459,6 +520,103 @@ function AiSection({ settings, update }: { settings: AppSettings; update: <K ext
   );
 }
 
+function providerFormDefaults(kind: ProviderFormKind) {
+  if (kind === "git-hub") {
+    return {
+      id: "github.company.com",
+      displayName: "GitHub Enterprise",
+      webBaseUrl: "https://github.company.com",
+      apiBaseUrl: "https://github.company.com/api/v3",
+      authMode: "personal_access_token",
+    };
+  }
+  if (kind === "gitee") {
+    return {
+      id: "gitee.company.com",
+      displayName: "Gitee Enterprise",
+      webBaseUrl: "https://gitee.company.com",
+      apiBaseUrl: "https://gitee.company.com/api/v5",
+      authMode: "personal_access_token",
+    };
+  }
+  if (kind === "web-dav") {
+    return {
+      id: "webdav-main",
+      displayName: "WebDAV",
+      webBaseUrl: "https://dav.example.com",
+      apiBaseUrl: "https://dav.example.com/remote.php/dav/files/user",
+      authMode: "basic",
+    };
+  }
+  return {
+    id: "gitlab.company.com",
+    displayName: "GitLab Enterprise",
+    webBaseUrl: "https://gitlab.company.com",
+    apiBaseUrl: "https://gitlab.company.com/api/v4",
+    authMode: "personal_access_token",
+  };
+}
+
+function defaultProviderForm(kind: ProviderFormKind = "git-lab") {
+  return {
+    kind,
+    ...providerFormDefaults(kind),
+    login: "",
+    secret: "",
+  };
+}
+
+function providerIdPrefix(kind: ProviderFormKind) {
+  if (kind === "git-hub") return "github";
+  if (kind === "git-lab") return "gitlab";
+  if (kind === "web-dav") return "webdav";
+  return "gitee";
+}
+
+function randomProviderIdSuffix() {
+  const bytes = new Uint8Array(3);
+  if (globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(bytes);
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+  return Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, "0");
+}
+
+function generateProviderInstanceId(kind: ProviderFormKind, existingIds: Iterable<string>) {
+  const prefix = providerIdPrefix(kind);
+  const existing = new Set(Array.from(existingIds, (id) => id.toLowerCase()));
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const id = `${prefix}-${randomProviderIdSuffix()}`;
+    if (!existing.has(id.toLowerCase())) return id;
+  }
+  return `${prefix}-${Date.now().toString(36).slice(-6)}`;
+}
+
+function providerFormKindFromInstance(instance: ProviderInstance): ProviderFormKind {
+  const kind = providerKindValue(instance).toLowerCase();
+  if (kind === "git-hub" || kind === "git-lab" || kind === "gitee" || kind === "web-dav") {
+    return kind;
+  }
+  return "git-lab";
+}
+
+function providerFormFromInstance(instance: ProviderInstance) {
+  return {
+    kind: providerFormKindFromInstance(instance),
+    id: instance.id,
+    displayName: instance.displayName,
+    webBaseUrl: instance.webBaseUrl,
+    apiBaseUrl: instance.apiBaseUrl,
+    authMode: firstAuthMode(instance),
+    login: "",
+    secret: "",
+  };
+}
+
+function isBuiltInProvider(instance: ProviderInstance) {
+  return instance.id === "github.com" || instance.id === "gitlab.com" || instance.id === "gitee.com";
+}
+
 function AccountSection({
   authLogin,
   authScopes,
@@ -473,45 +631,485 @@ function AccountSection({
   onLogout: () => void;
 }) {
   const { t } = useLocale();
-  return (
-    <div className="space-y-0">
-      <h3 className="settings-section-title">{t("settings.account")}</h3>
-      <SettingsRow
-        label={t("settings.githubAccount")}
-        description={authLogin ? t("settings.connected") + " @" + authLogin : t("settings.notConnected")}
-      >
-        <div className="flex items-center gap-2">
-          <span className="grid size-7 place-items-center rounded-full bg-[var(--brand-soft)] text-[10px] font-semibold text-[var(--brand-fg)]">
-            {(authLogin ?? "?").slice(0, 2).toUpperCase()}
-          </span>
-          <span className="text-[12.5px] font-medium">{authLogin ? "@" + authLogin : t("settings.notConnected")}</span>
-        </div>
-      </SettingsRow>
+  const queryClient = useQueryClient();
+  const instancesQuery = useQuery({
+    queryKey: ["provider-instances"],
+    queryFn: listProviderInstances,
+    enabled: true,
+  });
+  const authStatus = useQuery({
+    queryKey: ["auth-status"],
+    queryFn: getAuthStatus,
+    enabled: true,
+  });
+  const [addProviderOpen, setAddProviderOpen] = useState(false);
+  const [editingProviderId, setEditingProviderId] = useState<string | null>(null);
+  const [providerForm, setProviderForm] = useState(defaultProviderForm());
+  const fallbackInstances: ProviderInstance[] = [
+    {
+      id: "github.com",
+      kind: "git-hub",
+      displayName: "GitHub",
+      webBaseUrl: "https://github.com",
+      apiBaseUrl: "https://api.github.com",
+      authModes: ["personal_access_token", "device_flow"],
+      enabled: true,
+    },
+    {
+      id: "gitlab.com",
+      kind: "git-lab",
+      displayName: "GitLab.com",
+      webBaseUrl: "https://gitlab.com",
+      apiBaseUrl: "https://gitlab.com/api/v4",
+      authModes: ["personal_access_token"],
+      enabled: true,
+    },
+    {
+      id: "gitee.com",
+      kind: "gitee",
+      displayName: "Gitee",
+      webBaseUrl: "https://gitee.com",
+      apiBaseUrl: "https://gitee.com/api/v5",
+      authModes: ["personal_access_token"],
+      enabled: true,
+    },
+  ];
+  const instances = instancesQuery.data?.length ? instancesQuery.data : fallbackInstances;
+  const providerStatuses = authStatus.data?.providers ?? [];
+  const visibleProviders = instances
+    .filter((instance) => {
+      if (instance.id === "github.com") return true;
+      if (!isBuiltInProvider(instance)) return true;
+      return Boolean(providerStatuses.find((status) => status.provider === instance.id)?.authenticated);
+    })
+    .sort((a, b) => providerSortRank(a.id) - providerSortRank(b.id) || a.displayName.localeCompare(b.displayName));
 
-      {authLogin ? (
-        <>
-          {authScopes.length ? (
-            <SettingsRow label={t("settings.scopes")} description={t("settings.scopes.desc")}>
-              <span className="text-[12px] font-mono text-[var(--fg-muted)]">{authScopes.join(", ")}</span>
-            </SettingsRow>
-          ) : null}
-          <SettingsRow label={t("settings.logout")} description={t("settings.logout.desc")}>
-            <Button size="sm" variant="outline" onPress={onLogout} isPending={logoutPending}>
-              <LogOut size={13} />
-              {t("settings.logout.btn")}
-            </Button>
-          </SettingsRow>
-        </>
-      ) : (
-        <SettingsRow label={t("settings.login")} description={t("settings.login.desc")}>
-          <Button size="sm" variant="secondary" onPress={onLogin}>
-            <LogIn size={13} />
-            {t("auth.continueWithGithub")}
-          </Button>
-        </SettingsRow>
-      )}
-    </div>
+  const refreshProviders = async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["auth-status"] }),
+      queryClient.invalidateQueries({ queryKey: ["provider-instances"] }),
+      queryClient.invalidateQueries({ queryKey: ["provider-workspaces"] }),
+    ]);
+  };
+
+  const tokenLogin = useMutation({
+    mutationFn: ({
+      providerId,
+      token,
+      authMode,
+      login,
+    }: {
+      providerId: string;
+      token: string;
+      authMode?: string;
+      login?: string;
+    }) => loginProviderToken(providerId, token, { authMode, login }),
+    onSuccess: async (_status, variables) => {
+      await refreshProviders();
+      toast.success(t("settings.provider.saved"));
+    },
+    onError: (err) => toast.danger(String((err as { message?: string })?.message ?? err)),
+  });
+
+  const providerLogout = useMutation({
+    mutationFn: logoutProvider,
+    onSuccess: async () => {
+      await refreshProviders();
+      toast.success(t("settings.provider.loggedOut"));
+    },
+    onError: (err) => toast.danger(String((err as { message?: string })?.message ?? err)),
+  });
+
+  const saveInstance = useMutation({
+    mutationFn: upsertProviderInstance,
+    onSuccess: async () => {
+      await refreshProviders();
+    },
+    onError: (err) => toast.danger(String((err as { message?: string })?.message ?? err)),
+  });
+
+  const removeInstance = useMutation({
+    mutationFn: deleteProviderInstance,
+    onSuccess: async () => {
+      await refreshProviders();
+      toast.success(t("settings.provider.instanceDeleted"));
+    },
+    onError: (err) => toast.danger(String((err as { message?: string })?.message ?? err)),
+  });
+
+  const statusFor = (instance: ProviderInstance): ProviderAuthStatus | null => {
+    const fromQuery = providerStatuses.find((status) => status.provider === instance.id);
+    if (fromQuery) return fromQuery;
+    if (instance.id === "github.com" && authLogin) {
+      return {
+        provider: "github.com",
+        displayName: "GitHub",
+        login: authLogin,
+        scopes: authScopes,
+        authMode: "device_flow",
+        authenticated: true,
+      };
+    }
+    return null;
+  };
+
+  const providerFormUsesLoginSecret =
+    providerForm.kind === "web-dav" && usesWebDavLoginSecret(providerForm.authMode);
+  const providerFormSecretLabel =
+    providerForm.kind !== "web-dav"
+      ? t("settings.provider.tokenOptional")
+      : providerForm.authMode === "app_password"
+        ? t("settings.webdav.appPassword")
+        : providerFormUsesLoginSecret
+          ? t("settings.webdav.password")
+          : t("settings.webdav.bearerToken");
+  const providerFormDefaultsValue = providerFormDefaults(providerForm.kind);
+  const canSaveProvider = Boolean(
+    providerForm.id.trim() &&
+    providerForm.displayName.trim() &&
+    providerForm.webBaseUrl.trim() &&
+    providerForm.apiBaseUrl.trim() &&
+    (!providerForm.secret.trim() || !providerFormUsesLoginSecret || providerForm.login.trim()),
   );
+  const providerKindOptions = [
+    { value: "git-hub", label: t("settings.provider.kind.github") },
+    { value: "git-lab", label: t("settings.provider.kind.gitlab") },
+    { value: "gitee", label: t("settings.provider.kind.gitee") },
+    { value: "web-dav", label: t("settings.provider.kind.webdav") },
+  ];
+  const providerAuthModeOptions = [
+    { value: "basic", label: t("settings.webdav.auth.basic") },
+    { value: "app_password", label: t("settings.webdav.auth.appPassword") },
+    { value: "personal_access_token", label: t("settings.webdav.auth.token") },
+  ];
+  const editingProvider = editingProviderId
+    ? instances.find((instance) => instance.id === editingProviderId) ?? null
+    : null;
+  const isEditingProvider = Boolean(editingProviderId);
+
+  const defaultNewProviderForm = (kind: ProviderFormKind = "git-lab") => ({
+    ...defaultProviderForm(kind),
+    id: generateProviderInstanceId(kind, instances.map((instance) => instance.id)),
+  });
+
+  const openAddProvider = () => {
+    setEditingProviderId(null);
+    setProviderForm(defaultNewProviderForm());
+    setAddProviderOpen(true);
+  };
+
+  const openEditProvider = (instance: ProviderInstance) => {
+    setEditingProviderId(instance.id);
+    setProviderForm(providerFormFromInstance(instance));
+    setAddProviderOpen(true);
+  };
+
+  const closeProviderDialog = () => {
+    setAddProviderOpen(false);
+    setEditingProviderId(null);
+    setProviderForm(defaultNewProviderForm());
+  };
+
+  const onToggleProviderEnabled = (instance: ProviderInstance, enabled: boolean) => {
+    saveInstance.mutate(
+      { ...instance, enabled },
+      {
+        onSuccess: async () => {
+          await refreshProviders();
+          toast.success(enabled ? t("settings.provider.enabledSaved") : t("settings.provider.disabledSaved"));
+        },
+      },
+    );
+  };
+
+  const onSaveProvider = () => {
+    if (!canSaveProvider) return;
+    const id = editingProviderId ?? providerForm.id.trim();
+    const instance = {
+      id,
+      kind: providerForm.kind,
+      displayName: providerForm.displayName.trim(),
+      webBaseUrl: providerForm.webBaseUrl.trim(),
+      apiBaseUrl: providerForm.apiBaseUrl.trim(),
+      authModes: [providerForm.authMode],
+      enabled: editingProvider?.enabled ?? true,
+    };
+    saveInstance.mutate(instance, {
+      onSuccess: () => {
+        const secret = providerForm.secret.trim();
+        closeProviderDialog();
+        if (!secret) {
+          toast.success(t("settings.provider.instanceSaved"));
+          return;
+        }
+        tokenLogin.mutate({
+          providerId: id,
+          token: secret,
+          authMode: providerForm.authMode,
+          login: providerFormUsesLoginSecret ? providerForm.login.trim() : undefined,
+        });
+      },
+    });
+  };
+
+  return (
+    <>
+      <div className="space-y-4">
+        <div className="flex items-center justify-between gap-3">
+          <h3 className="settings-section-title !mb-0">{t("settings.account")}</h3>
+          <Button
+            size="sm"
+            variant="secondary"
+            onPress={openAddProvider}
+          >
+            <Plus size={13} />
+            {t("settings.provider.add")}
+          </Button>
+        </div>
+
+        <div className="space-y-2">
+          {visibleProviders.map((instance) => {
+            const status = statusFor(instance);
+            const connected = Boolean(status?.authenticated);
+            const isGithubOauth = instance.id === "github.com";
+            const isCustomProvider = !isBuiltInProvider(instance);
+            const scopes = status?.scopes ?? [];
+            const statusLabel = !instance.enabled
+              ? t("settings.provider.disabled")
+              : connected
+                ? t("settings.connected")
+                : t("settings.notConnected");
+            const statusClass = !instance.enabled ? "is-disabled" : connected ? "is-connected" : "";
+            return (
+              <div className="settings-provider-card" key={instance.id}>
+                <div className="flex min-w-0 flex-1 items-start gap-3">
+                  <span className="settings-provider-icon">{providerIcon(instance)}</span>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex min-w-0 flex-wrap items-center gap-2">
+                      <div className="truncate text-[13px] font-semibold text-[var(--fg)]">{instance.displayName}</div>
+                      <span className={`settings-provider-status ${statusClass}`}>
+                        {statusLabel}
+                      </span>
+                    </div>
+                    <div className="mt-0.5 truncate text-[11.5px] text-[var(--fg-muted)]">
+                      {connected && status?.login ? `@${status.login}` : instance.webBaseUrl}
+                    </div>
+                    {connected && scopes.length ? (
+                      <div className="mt-2 truncate font-mono text-[11px] text-[var(--fg-muted)]">
+                        {scopes.join(", ")}
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  {isCustomProvider ? (
+                    <>
+                      <label className="settings-provider-switch">
+                        <Switch
+                          isSelected={instance.enabled}
+                          isDisabled={saveInstance.isPending}
+                          onChange={(enabled) => onToggleProviderEnabled(instance, enabled)}
+                        >
+                          <Switch.Control>
+                            <Switch.Thumb />
+                          </Switch.Control>
+                        </Switch>
+                        <span>{instance.enabled ? t("settings.provider.enabledShort") : t("settings.provider.disabledShort")}</span>
+                      </label>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onPress={() => openEditProvider(instance)}
+                      >
+                        <Pencil size={13} />
+                        {t("settings.provider.edit")}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onPress={() => removeInstance.mutate(instance.id)}
+                        isPending={removeInstance.isPending}
+                      >
+                        <Trash2 size={13} />
+                        {t("settings.provider.delete")}
+                      </Button>
+                    </>
+                  ) : connected ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onPress={isGithubOauth ? onLogout : () => providerLogout.mutate(instance.id)}
+                      isPending={(isGithubOauth && logoutPending) || providerLogout.isPending}
+                    >
+                      <LogOut size={13} />
+                      {t("settings.logout.btn")}
+                    </Button>
+                  ) : isGithubOauth ? (
+                    <Button size="sm" variant="secondary" onPress={onLogin}>
+                      <LogIn size={13} />
+                      {t("auth.continueWithGithub")}
+                    </Button>
+                  ) : null}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <Modal isOpen={addProviderOpen} onOpenChange={(open) => (open ? setAddProviderOpen(true) : closeProviderDialog())}>
+        <Modal.Backdrop>
+          <Modal.Container size="md">
+            <Modal.Dialog className="rounded-[12px] bg-[var(--bg-elevated)] outline-none">
+              <Modal.CloseTrigger />
+              <Modal.Header className="border-b border-[var(--line)] px-5 py-4">
+                <Modal.Heading className="text-[15px] font-semibold tracking-tight">
+                  {isEditingProvider ? t("settings.provider.editTitle") : t("settings.provider.addTitle")}
+                </Modal.Heading>
+                <div className="mt-1 text-[12px] text-[var(--fg-muted)]">
+                  {isEditingProvider ? t("settings.provider.editDesc") : t("settings.provider.addDesc")}
+                </div>
+              </Modal.Header>
+              <Modal.Body className="space-y-3 px-5 py-4">
+                <SelectControl
+                  value={providerForm.kind}
+                  label={t("settings.provider.kind")}
+                  options={providerKindOptions}
+                  onChange={(value) => setProviderForm(defaultNewProviderForm(value as ProviderFormKind))}
+                  isDisabled={isEditingProvider}
+                />
+                <SettingsField label={t("settings.provider.name")}>
+                  <Input
+                    value={providerForm.displayName}
+                    onChange={(e) => setProviderForm((next) => ({ ...next, displayName: e.target.value }))}
+                    placeholder={providerFormDefaultsValue.displayName}
+                    variant="secondary"
+                    aria-label={t("settings.provider.name")}
+                    fullWidth
+                  />
+                </SettingsField>
+                <SettingsField label={t("settings.provider.webUrl")}>
+                  <Input
+                    value={providerForm.webBaseUrl}
+                    onChange={(e) => setProviderForm((next) => ({ ...next, webBaseUrl: e.target.value }))}
+                    placeholder={providerFormDefaultsValue.webBaseUrl}
+                    variant="secondary"
+                    aria-label={t("settings.provider.webUrl")}
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    fullWidth
+                  />
+                </SettingsField>
+                <SettingsField label={providerForm.kind === "web-dav" ? t("settings.provider.webdavUrl") : t("settings.provider.apiUrl")}>
+                  <Input
+                    value={providerForm.apiBaseUrl}
+                    onChange={(e) => setProviderForm((next) => ({ ...next, apiBaseUrl: e.target.value }))}
+                    placeholder={providerFormDefaultsValue.apiBaseUrl}
+                    variant="secondary"
+                    aria-label={providerForm.kind === "web-dav" ? t("settings.provider.webdavUrl") : t("settings.provider.apiUrl")}
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    fullWidth
+                  />
+                </SettingsField>
+                {providerForm.kind === "web-dav" ? (
+                  <SelectControl
+                    value={providerForm.authMode}
+                    label={t("settings.provider.authMode")}
+                    options={providerAuthModeOptions}
+                    onChange={(value) =>
+                      setProviderForm((next) => ({
+                        ...next,
+                        authMode: value,
+                        login: "",
+                        secret: "",
+                      }))
+                    }
+                  />
+                ) : null}
+                {providerFormUsesLoginSecret ? (
+                  <SettingsField label={t("settings.webdav.username")}>
+                    <Input
+                      value={providerForm.login}
+                      onChange={(e) => setProviderForm((next) => ({ ...next, login: e.target.value }))}
+                      placeholder={t("settings.webdav.username")}
+                      variant="secondary"
+                      aria-label={t("settings.webdav.username")}
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck={false}
+                      fullWidth
+                    />
+                  </SettingsField>
+                ) : null}
+                <SettingsField label={providerFormSecretLabel}>
+                  <Input
+                    type="password"
+                    value={providerForm.secret}
+                    onChange={(e) => setProviderForm((next) => ({ ...next, secret: e.target.value }))}
+                    placeholder={providerFormSecretLabel}
+                    variant="secondary"
+                    aria-label={providerFormSecretLabel}
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    fullWidth
+                  />
+                </SettingsField>
+              </Modal.Body>
+              <div className="flex justify-end gap-2 border-t border-[var(--line)] px-5 py-3">
+                <Button variant="outline" onPress={closeProviderDialog}>
+                  {t("common.cancel")}
+                </Button>
+                <Button
+                  onPress={onSaveProvider}
+                  isPending={saveInstance.isPending || tokenLogin.isPending}
+                  isDisabled={!canSaveProvider}
+                >
+                  <Save size={13} />
+                  {isEditingProvider ? t("settings.provider.saveChanges") : t("settings.provider.save")}
+                </Button>
+              </div>
+            </Modal.Dialog>
+          </Modal.Container>
+        </Modal.Backdrop>
+      </Modal>
+    </>
+  );
+}
+
+function providerKindValue(instance: ProviderInstance) {
+  return typeof instance.kind === "string" ? instance.kind : instance.kind.custom;
+}
+
+function isWebDavProvider(instance: ProviderInstance) {
+  return providerKindValue(instance).toLowerCase() === "web-dav";
+}
+
+function providerSortRank(id: string) {
+  if (id === "github.com") return 0;
+  if (id === "gitlab.com") return 1;
+  if (id === "gitee.com") return 2;
+  return 10;
+}
+
+function firstAuthMode(instance: ProviderInstance) {
+  return instance.authModes[0] ?? "personal_access_token";
+}
+
+function usesWebDavLoginSecret(authMode: string) {
+  return authMode === "basic" || authMode === "app_password";
+}
+
+function providerIcon(instance: ProviderInstance) {
+  const kind = providerKindValue(instance).toLowerCase();
+  if (kind === "git-hub") return <Github size={15} />;
+  if (kind === "git-lab") return <Gitlab size={15} />;
+  if (kind === "gitee") return <GitBranch size={15} />;
+  if (kind === "web-dav") return <Server size={15} />;
+  return <Globe2 size={15} />;
 }
 
 function AboutSection() {

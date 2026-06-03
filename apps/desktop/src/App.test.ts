@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { navRoutes, pageCopyKeys, routeToPage } from "./utils/navigation";
 import { formatError } from "./utils/format";
+import {
+  githubRepoPath,
+  providerSupportsComments,
+  workspaceProviderId,
+  workspaceMatchesSelection,
+} from "./lib/providers";
 
 describe("desktop routed management pages", () => {
   it("maps routed URLs to the correct workbench page", () => {
@@ -45,5 +51,59 @@ describe("desktop routed management pages", () => {
       }),
     ).toBe("invalid_request: The request body is invalid.");
     expect(formatError(new Error("network unavailable"))).toBe("network unavailable");
+  });
+
+  it("detects provider-aware workspace refs for social UI", () => {
+    expect(workspaceProviderId("acme/team-skills")).toBe("github.com");
+    expect(workspaceProviderId("gitlab.com/platform/ai/team-skills")).toBe("gitlab.com");
+    expect(githubRepoPath("github.com/acme/team-skills")).toBe("acme/team-skills");
+    expect(githubRepoPath("acme/team-skills")).toBe("acme/team-skills");
+  });
+
+  it("matches scan results against provider-aware workspace selections", () => {
+    const githubWorkspace = {
+      provider: "github.com",
+      full_name: "acme/team-skills",
+    };
+    const gitlabWorkspace = {
+      provider: "gitlab.com",
+      full_name: "acme/team-skills",
+    };
+
+    expect(workspaceMatchesSelection(githubWorkspace, "github.com/acme/team-skills")).toBe(true);
+    expect(workspaceMatchesSelection(githubWorkspace, "acme/team-skills")).toBe(true);
+    expect(workspaceMatchesSelection(gitlabWorkspace, "gitlab.com/acme/team-skills")).toBe(true);
+    expect(workspaceMatchesSelection(gitlabWorkspace, "acme/team-skills")).toBe(false);
+  });
+
+  it("keeps comments UI GitHub-only until provider social capabilities exist", () => {
+    expect(
+      providerSupportsComments(
+        {
+          id: "github.com",
+          kind: "git-hub",
+          displayName: "GitHub",
+          webBaseUrl: "https://github.com",
+          apiBaseUrl: "https://api.github.com",
+          authModes: [],
+          enabled: true,
+        },
+        "github.com",
+      ),
+    ).toBe(true);
+    expect(
+      providerSupportsComments(
+        {
+          id: "webdav-company",
+          kind: "web-dav",
+          displayName: "Company WebDAV",
+          webBaseUrl: "https://dav.example.test/skills",
+          apiBaseUrl: "https://dav.example.test/skills",
+          authModes: [],
+          enabled: true,
+        },
+        "webdav-company",
+      ),
+    ).toBe(false);
   });
 });

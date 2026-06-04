@@ -68,7 +68,11 @@ export function providerSupportsPullRequestActions(
   instance: ProviderInstance | undefined,
   providerId: string | null | undefined,
 ) {
-  return providerIsGitHub(instance, providerId);
+  return (
+    providerIsGitHub(instance, providerId) ||
+    providerIsGitLab(instance, providerId) ||
+    providerIsGitee(instance, providerId)
+  );
 }
 
 export function providerSupportsActivityPage(
@@ -98,6 +102,17 @@ export function providerSupportsInvitations(
   providerId: string | null | undefined,
 ) {
   return providerIsGitHub(instance, providerId);
+}
+
+export function providerSupportsMemberManagement(
+  instance: ProviderInstance | undefined,
+  providerId: string | null | undefined,
+) {
+  return (
+    providerIsGitHub(instance, providerId) ||
+    providerIsGitLab(instance, providerId) ||
+    providerIsGitee(instance, providerId)
+  );
 }
 
 export function workspaceKey(workspace: Pick<Workspace, "provider" | "full_name">) {

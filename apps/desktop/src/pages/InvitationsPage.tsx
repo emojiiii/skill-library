@@ -1,11 +1,10 @@
-import { Button, Input } from "@heroui/react";
+import { Button, Input, toast } from "@heroui/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { UseMutationResult } from "@tanstack/react-query";
 import { Check, ExternalLink, RefreshCw, UserPlus } from "lucide-react";
 import { useLocale } from "../hooks/useLocale";
 import type {
   Invitation,
-  InvitationRecord,
   RepositoryInvitation,
   WorkspaceMember,
 } from "../lib/skill-library";
@@ -23,7 +22,9 @@ export function InvitationsPage({
   providerName = "GitHub",
   workspacePermission,
   supportsMembers = true,
-  supportsInvitations = true,
+  supportsIncomingInvitations = true,
+  supportsMemberManagement = true,
+  memberManagementBlockedReason = null,
   inviteLogin,
   setInviteLogin,
   inviteRole,
@@ -36,13 +37,13 @@ export function InvitationsPage({
   providerName?: string;
   workspacePermission: string;
   supportsMembers?: boolean;
-  supportsInvitations?: boolean;
+  supportsIncomingInvitations?: boolean;
+  supportsMemberManagement?: boolean;
+  memberManagementBlockedReason?: string | null;
   inviteLogin: string;
   setInviteLogin: (value: string) => void;
   inviteRole: InviteRole;
   setInviteRole: (value: InviteRole) => void;
-  invitations?: InvitationRecord[];
-  invitationError?: string | null;
   members: WorkspaceMember[];
   membersError: string | null;
   inviteCollaborator: UseMutationResult<Invitation, Error, void, unknown>;
@@ -54,7 +55,7 @@ export function InvitationsPage({
     queryKey: ["repo-invitations"],
     queryFn: listRepositoryInvitations,
     staleTime: 60 * 1000,
-    enabled: supportsInvitations,
+    enabled: supportsIncomingInvitations,
   });
 
   const accept = useMutation({
@@ -65,14 +66,17 @@ export function InvitationsPage({
     },
   });
 
-  const incomingList = supportsInvitations ? incoming.data ?? [] : [];
-  const incomingError = supportsInvitations && incoming.error
+  const incomingList = supportsIncomingInvitations ? incoming.data ?? [] : [];
+  const incomingError = supportsIncomingInvitations && incoming.error
     ? incoming.error instanceof Error
       ? incoming.error.message
       : String(incoming.error)
     : null;
+  const showMemberManagementBlocked = () => {
+    if (memberManagementBlockedReason) toast.warning(memberManagementBlockedReason);
+  };
 
-  if (!supportsMembers && !supportsInvitations) {
+  if (!supportsMembers && !supportsIncomingInvitations && !supportsMemberManagement) {
     return (
       <section className="grid min-h-0 flex-1 place-items-center overflow-hidden px-6 py-6">
         <div className="empty-state mx-auto max-w-md">
@@ -86,12 +90,14 @@ export function InvitationsPage({
   return (
     <section className="flex min-h-0 flex-1 overflow-hidden px-6 py-6">
       <div className="mx-auto flex h-full min-h-0 w-full max-w-6xl flex-col gap-5">
-        <div className="grid gap-3 md:grid-cols-3">
-          <MetricTile
-            label={t("invitations.incoming")}
-            value={incomingList.length}
-            tone={incomingList.length ? "warning" : "default"}
-          />
+        <div className={supportsIncomingInvitations ? "grid gap-3 md:grid-cols-3" : "grid gap-3 md:grid-cols-2"}>
+          {supportsIncomingInvitations ? (
+            <MetricTile
+              label={t("invitations.incoming")}
+              value={incomingList.length}
+              tone={incomingList.length ? "warning" : "default"}
+            />
+          ) : null}
           <MetricTile
             label={t("invitations.members")}
             value={members.length}
@@ -101,7 +107,7 @@ export function InvitationsPage({
         </div>
 
         <div className="flex min-h-0 flex-1 flex-col gap-5">
-          {supportsInvitations ? (
+          {supportsIncomingInvitations ? (
             <ManagementTable
               title={t("invitations.reposInvitedYou")}
               subtitle={t("invitations.reposInvitedYouSub")}
@@ -133,8 +139,8 @@ export function InvitationsPage({
             </ManagementTable>
           ) : null}
 
-          <div className={supportsInvitations ? "grid min-h-0 flex-1 gap-5 xl:grid-cols-[400px_minmax(0,1fr)]" : "grid min-h-0 flex-1 gap-5"}>
-            {supportsInvitations ? (
+          <div className={supportsMemberManagement ? "grid min-h-0 flex-1 gap-5 xl:grid-cols-[400px_minmax(0,1fr)]" : "grid min-h-0 flex-1 gap-5"}>
+            {supportsMemberManagement ? (
               <Card className="self-start p-4">
                 <div className="mb-3 flex items-start justify-between gap-3">
                   <div className="min-w-0">
@@ -157,9 +163,16 @@ export function InvitationsPage({
                     spellCheck={false}
                   />
                   <Button
-                    onPress={() => inviteCollaborator.mutate()}
+                    onPress={() => {
+                      if (memberManagementBlockedReason) {
+                        showMemberManagementBlocked();
+                        return;
+                      }
+                      inviteCollaborator.mutate();
+                    }}
                     isPending={inviteCollaborator.isPending}
                     isDisabled={!inviteLogin.trim() || !workspaceRef}
+                    className={memberManagementBlockedReason ? "opacity-60" : undefined}
                   >
                     <UserPlus size={14} />
                     {t("invitations.invite")}
@@ -187,6 +200,11 @@ export function InvitationsPage({
                     {t("invitations.invited")} {inviteCollaborator.data.login_or_email} · {inviteCollaborator.data.state}
                   </div>
                 ) : null}
+                {memberManagementBlockedReason ? (
+                  <div className="mt-3 rounded-md border border-[var(--warning)] bg-[var(--warning-soft)] px-3 py-2 text-xs text-[var(--warning)]">
+                    {memberManagementBlockedReason}
+                  </div>
+                ) : null}
               </Card>
             ) : null}
 
@@ -205,9 +223,12 @@ export function InvitationsPage({
                     key={member.login}
                     member={member}
                     onChangeRole={
-                      supportsInvitations
+                      supportsMemberManagement
                         ? (login, role) => {
-                            // Use the invite API to update permission (GitHub treats re-invite as permission update)
+                            if (memberManagementBlockedReason) {
+                              showMemberManagementBlocked();
+                              return;
+                            }
                             inviteGithubCollaborator({
                               workspace: workspaceRef,
                               login,

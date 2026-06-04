@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use skill_library_provider::{
-    ChangedFile, FileEntry, FileKind, Member, PullRequestSummary, Release, RepositoryEvent, Tag,
-    Workspace,
+    ChangedFile, FileEntry, FileKind, IssueComment, Member, PullRequestSummary, Release,
+    RepositoryEvent, Tag, Workspace,
 };
 
 use crate::permissions::{
@@ -231,6 +231,8 @@ pub(crate) struct MergeRequestResponse {
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct GitLabUserResponse {
+    #[serde(default)]
+    pub(crate) id: Option<u64>,
     pub(crate) username: String,
 }
 
@@ -264,6 +266,52 @@ impl From<MergeRequestResponse> for PullRequestSummary {
 pub(crate) struct MergeRequestChangesResponse {
     #[serde(default)]
     pub(crate) changes: Vec<CompareDiffResponse>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct MergeRequestCloseRequest {
+    pub(crate) state_event: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct MergeRequestNoteRequest<'a> {
+    pub(crate) body: &'a str,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct MergeRequestNoteResponse {
+    pub(crate) id: u64,
+    #[serde(default)]
+    pub(crate) body: Option<String>,
+    pub(crate) created_at: String,
+}
+
+impl From<MergeRequestNoteResponse> for IssueComment {
+    fn from(value: MergeRequestNoteResponse) -> Self {
+        Self {
+            id: value.id,
+            html_url: String::new(),
+            body: value.body,
+            created_at: value.created_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct MemberAccessRequest {
+    pub(crate) user_id: u64,
+    pub(crate) access_level: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct MemberUpdateRequest {
+    pub(crate) access_level: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ProjectInvitationRequest<'a> {
+    pub(crate) email: &'a str,
+    pub(crate) access_level: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]

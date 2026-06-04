@@ -1,5 +1,5 @@
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, USER_AGENT};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use skill_library_core::{ProviderInstance, ProviderKind, WorkspaceRef};
 use skill_library_provider::{Page, ProviderError, Result, SkillSourceProvider, SourceRef};
 
@@ -17,11 +17,18 @@ pub struct GitLabProvider {
 #[derive(Debug, Clone)]
 pub struct GitLabTokenInfo {
     pub login: String,
+    pub scopes: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct CurrentUserResponse {
     username: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CurrentTokenResponse {
+    #[serde(default)]
+    scopes: Vec<String>,
 }
 
 impl GitLabProvider {
@@ -75,8 +82,23 @@ impl GitLabProvider {
 
     pub async fn validate_token(&self) -> Result<GitLabTokenInfo> {
         let user: CurrentUserResponse = self.get_json("/user").await?;
+        let scopes = match self
+            .get_json::<CurrentTokenResponse>("/personal_access_tokens/self")
+            .await
+        {
+            Ok(token) => token.scopes,
+            Err(err) => {
+                tracing::debug!(
+                    target: "skill-library-gitlab",
+                    error = %err,
+                    "could not read GitLab token scopes"
+                );
+                Vec::new()
+            }
+        };
         Ok(GitLabTokenInfo {
             login: user.username,
+            scopes,
         })
     }
 
@@ -92,6 +114,83 @@ impl GitLabProvider {
                     cause: err.to_string(),
                 })?;
         map_response(path, "GET", response).await
+    }
+
+    pub(crate) async fn post_json<B: Serialize, T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
+        let url = format!("{}{}", self.api_base, path);
+        tracing::debug!(target: "skill-library-gitlab", method = "POST", path);
+        let response = self
+            .client
+            .post(url)
+            .json(body)
+            .send()
+            .await
+            .map_err(|err| ProviderError::NetworkError {
+                cause: err.to_string(),
+            })?;
+        map_response(path, "POST", response).await
+    }
+
+    pub(crate) async fn post_status<B: Serialize>(&self, path: &str, body: &B) -> Result<()> {
+        let url = format!("{}{}", self.api_base, path);
+        tracing::debug!(target: "skill-library-gitlab", method = "POST", path);
+        let response = self
+            .client
+            .post(url)
+            .json(body)
+            .send()
+            .await
+            .map_err(|err| ProviderError::NetworkError {
+                cause: err.to_string(),
+            })?;
+        self.map_empty_response(path, "POST", response).await
+    }
+
+    pub(crate) async fn put_json<B: Serialize, T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
+        let url = format!("{}{}", self.api_base, path);
+        tracing::debug!(target: "skill-library-gitlab", method = "PUT", path);
+        let response = self
+            .client
+            .put(url)
+            .json(body)
+            .send()
+            .await
+            .map_err(|err| ProviderError::NetworkError {
+                cause: err.to_string(),
+            })?;
+        map_response(path, "PUT", response).await
+    }
+
+    async fn map_empty_response(
+        &self,
+        path: &str,
+        method: &str,
+        response: reqwest::Response,
+    ) -> Result<()> {
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let raw_body = response.text().await.unwrap_or_else(|_| status.to_string());
+        let detail = crate::http::response_error_message(method, path, status, &raw_body);
+        let body = snippet(&raw_body);
+        tracing::warn!(
+            target: "skill-library-gitlab",
+            method,
+            path,
+            status = status.as_u16(),
+            body = %body,
+            "non-success response"
+        );
+        Err(crate::http::provider_error_from_status(status, detail))
     }
 
     pub(crate) async fn get_page_json<T: for<'de> Deserialize<'de>>(

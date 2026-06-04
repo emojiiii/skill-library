@@ -12,7 +12,7 @@ pub(crate) fn gitee_capabilities() -> ProviderCapabilities {
         release_assets: Capability::Supported,
         change_requests: Capability::Experimental,
         direct_file_write: Capability::Unsupported,
-        invitations: Capability::Unsupported,
+        invitations: Capability::Supported,
         members: Capability::Supported,
         webhooks: Capability::Unsupported,
         discussions: Capability::Unsupported,

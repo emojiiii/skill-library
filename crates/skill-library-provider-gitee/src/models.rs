@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use skill_library_provider::{
-    ChangedFile, FileEntry, FileKind, Member, PullRequestSummary, Release, RepositoryEvent, Tag,
-    Workspace,
+    ChangedFile, FileEntry, FileKind, IssueComment, Member, PullRequest, PullRequestSummary,
+    Release, RepositoryEvent, Tag, Workspace,
 };
 
 use crate::permissions::{permission_from_name, permission_from_repo, split_repo_path};
@@ -282,6 +282,21 @@ impl From<PullRequestResponse> for PullRequestSummary {
     }
 }
 
+impl From<PullRequestResponse> for PullRequest {
+    fn from(value: PullRequestResponse) -> Self {
+        let state = match value.state.as_str() {
+            "open" | "opened" => "open",
+            _ => "closed",
+        };
+        Self {
+            number: value.number.or(value.id).unwrap_or(0),
+            title: value.title,
+            html_url: value.html_url,
+            state: state.to_owned(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct PullRequestFileResponse {
     #[serde(default, alias = "new_path")]
@@ -391,4 +406,41 @@ impl From<CollaboratorResponse> for Member {
             avatar_url: value.avatar_url,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ClosePullRequestRequest {
+    pub(crate) state: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct PullRequestCommentRequest<'a> {
+    pub(crate) body: &'a str,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct PullRequestCommentResponse {
+    pub(crate) id: u64,
+    #[serde(default, alias = "url")]
+    pub(crate) html_url: String,
+    #[serde(default)]
+    pub(crate) body: Option<String>,
+    #[serde(default)]
+    pub(crate) created_at: String,
+}
+
+impl From<PullRequestCommentResponse> for IssueComment {
+    fn from(value: PullRequestCommentResponse) -> Self {
+        Self {
+            id: value.id,
+            html_url: value.html_url,
+            body: value.body,
+            created_at: value.created_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct CollaboratorRequest<'a> {
+    pub(crate) permission: &'a str,
 }

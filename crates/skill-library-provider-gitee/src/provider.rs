@@ -1,5 +1,5 @@
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use skill_library_core::{ProviderInstance, ProviderKind, WorkspaceRef};
 use skill_library_provider::{Page, ProviderError, Result, SkillSourceProvider, SourceRef};
 
@@ -75,6 +75,112 @@ impl GiteeProvider {
                     cause: err.to_string(),
                 })?;
         map_response(&safe_path, "GET", response).await
+    }
+
+    pub(crate) async fn post_json<B: Serialize, T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
+        let path = self.auth_path(path);
+        let safe_path = redact_access_token(&path);
+        let url = format!("{}{}", self.api_base, path);
+        tracing::debug!(target: "skill-library-gitee", method = "POST", path = %safe_path);
+        let response = self
+            .client
+            .post(url)
+            .json(body)
+            .send()
+            .await
+            .map_err(|err| ProviderError::NetworkError {
+                cause: err.to_string(),
+            })?;
+        map_response(&safe_path, "POST", response).await
+    }
+
+    pub(crate) async fn put_json<B: Serialize, T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
+        let path = self.auth_path(path);
+        let safe_path = redact_access_token(&path);
+        let url = format!("{}{}", self.api_base, path);
+        tracing::debug!(target: "skill-library-gitee", method = "PUT", path = %safe_path);
+        let response = self
+            .client
+            .put(url)
+            .json(body)
+            .send()
+            .await
+            .map_err(|err| ProviderError::NetworkError {
+                cause: err.to_string(),
+            })?;
+        map_response(&safe_path, "PUT", response).await
+    }
+
+    pub(crate) async fn put_status<B: Serialize>(&self, path: &str, body: &B) -> Result<()> {
+        let path = self.auth_path(path);
+        let safe_path = redact_access_token(&path);
+        let url = format!("{}{}", self.api_base, path);
+        tracing::debug!(target: "skill-library-gitee", method = "PUT", path = %safe_path);
+        let response = self
+            .client
+            .put(url)
+            .json(body)
+            .send()
+            .await
+            .map_err(|err| ProviderError::NetworkError {
+                cause: err.to_string(),
+            })?;
+        self.map_empty_response(&safe_path, "PUT", response).await
+    }
+
+    pub(crate) async fn patch_json<B: Serialize, T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
+        let path = self.auth_path(path);
+        let safe_path = redact_access_token(&path);
+        let url = format!("{}{}", self.api_base, path);
+        tracing::debug!(target: "skill-library-gitee", method = "PATCH", path = %safe_path);
+        let response = self
+            .client
+            .patch(url)
+            .json(body)
+            .send()
+            .await
+            .map_err(|err| ProviderError::NetworkError {
+                cause: err.to_string(),
+            })?;
+        map_response(&safe_path, "PATCH", response).await
+    }
+
+    async fn map_empty_response(
+        &self,
+        path: &str,
+        method: &str,
+        response: reqwest::Response,
+    ) -> Result<()> {
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let body = response.text().await.unwrap_or_else(|_| status.to_string());
+        let body = snippet(&body);
+        tracing::warn!(
+            target: "skill-library-gitee",
+            method,
+            path,
+            status = status.as_u16(),
+            body = %body,
+            "non-success response"
+        );
+        Err(crate::http::provider_error_from_status(
+            status,
+            format!("{method} {path} ({status}): {body}"),
+        ))
     }
 
     pub(crate) async fn get_page_json<T: for<'de> Deserialize<'de>>(

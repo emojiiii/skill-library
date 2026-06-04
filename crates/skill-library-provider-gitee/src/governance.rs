@@ -1,11 +1,14 @@
 use skill_library_core::WorkspaceRef;
 use skill_library_provider::{
-    ChangedFile, Member, Page, PageOpts, PullRequestQueryState, PullRequestSummary,
-    RepositoryEvent, Result,
+    ChangedFile, Invitation, InvitationInput, IssueComment, Member, Page, PageOpts,
+    PermissionLevel, PullRequest, PullRequestQueryState, PullRequestSummary, RepositoryEvent,
+    Result,
 };
 
 use crate::models::{
-    CollaboratorResponse, PullRequestFileResponse, PullRequestResponse, RepositoryEventResponse,
+    ClosePullRequestRequest, CollaboratorRequest, CollaboratorResponse, PullRequestCommentRequest,
+    PullRequestCommentResponse, PullRequestFileResponse, PullRequestResponse,
+    RepositoryEventResponse,
 };
 use crate::provider::GiteeProvider;
 use crate::util::url_encode;
@@ -71,5 +74,104 @@ impl GiteeProvider {
             items: raw.items.into_iter().map(Member::from).collect(),
             next_cursor: raw.next_cursor,
         })
+    }
+
+    pub async fn merge_pull_request(
+        &self,
+        reference: &WorkspaceRef,
+        number: u64,
+    ) -> Result<PullRequest> {
+        let (owner, repo) = Self::owner_repo(reference);
+        let raw: PullRequestResponse = self
+            .put_json(
+                &format!("/repos/{owner}/{repo}/pulls/{number}/merge"),
+                &serde_json::json!({ "merge_method": "squash" }),
+            )
+            .await?;
+        Ok(raw.into())
+    }
+
+    pub async fn close_pull_request(
+        &self,
+        reference: &WorkspaceRef,
+        number: u64,
+    ) -> Result<PullRequestSummary> {
+        let (owner, repo) = Self::owner_repo(reference);
+        let raw: PullRequestResponse = self
+            .patch_json(
+                &format!("/repos/{owner}/{repo}/pulls/{number}"),
+                &ClosePullRequestRequest { state: "closed" },
+            )
+            .await?;
+        Ok(raw.into())
+    }
+
+    pub async fn add_pull_request_comment(
+        &self,
+        reference: &WorkspaceRef,
+        number: u64,
+        body: &str,
+    ) -> Result<IssueComment> {
+        let (owner, repo) = Self::owner_repo(reference);
+        let raw: PullRequestCommentResponse = self
+            .post_json(
+                &format!("/repos/{owner}/{repo}/pulls/{number}/comments"),
+                &PullRequestCommentRequest { body },
+            )
+            .await?;
+        Ok(raw.into())
+    }
+
+    pub async fn upsert_collaborator(
+        &self,
+        reference: &WorkspaceRef,
+        input: InvitationInput,
+    ) -> Result<Invitation> {
+        let (owner, repo) = Self::owner_repo(reference);
+        let permission = gitee_permission(&input.role);
+        self.put_status(
+            &format!(
+                "/repos/{owner}/{repo}/collaborators/{}",
+                url_encode(&input.login_or_email)
+            ),
+            &CollaboratorRequest { permission },
+        )
+        .await?;
+        Ok(Invitation {
+            id: input.login_or_email.clone(),
+            login_or_email: input.login_or_email,
+            state: "active".to_owned(),
+        })
+    }
+
+    pub async fn update_collaborator_role(
+        &self,
+        reference: &WorkspaceRef,
+        login: &str,
+        role: PermissionLevel,
+    ) -> Result<Member> {
+        let assigned_role = role.clone();
+        let invitation = self
+            .upsert_collaborator(
+                reference,
+                InvitationInput {
+                    login_or_email: login.to_owned(),
+                    role,
+                },
+            )
+            .await?;
+        Ok(Member {
+            login: invitation.login_or_email,
+            role: assigned_role,
+            avatar_url: None,
+        })
+    }
+}
+
+fn gitee_permission(role: &PermissionLevel) -> &'static str {
+    match role {
+        PermissionLevel::Admin => "admin",
+        PermissionLevel::Maintain | PermissionLevel::Write => "push",
+        PermissionLevel::Triage | PermissionLevel::Read | PermissionLevel::None => "pull",
     }
 }

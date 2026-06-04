@@ -518,6 +518,10 @@ const zh: Record<string, string> = {
   "publishPage.commentNote": "这里的留言是普通 PR conversation comment。行级 review comment 需要 GitHub 的 diff 位置映射，暂未接入。",
   "publishPage.unsupportedTitle": "发布 PR 暂不可用",
   "publishPage.unsupportedDesc": "{provider} 暂未接入发布 PR 页面。",
+  "permissions.loginRequired": "请先登录 {provider} 后再执行该操作。",
+  "permissions.gitlabApiScopeRequired": "当前 {provider} token 缺少或无法确认 api scope。请在设置里重新登录包含 api scope 的 token。",
+  "permissions.workspaceWriteRequired": "当前工作区角色是 {role}，需要 Write、Maintain 或 Admin 权限。",
+  "permissions.workspaceMaintainRequired": "当前工作区角色是 {role}，需要 Maintain 或 Admin 权限。",
 
   // --- Activity Page (extra) ---
   "activity.selectWorkspace": "从选择器中选择一个工作区来查看最近动态。",
@@ -535,7 +539,7 @@ const zh: Record<string, string> = {
   "invitations.noInvitations": "GitHub 上没有待处理的仓库邀请。",
   "invitations.inviteCollaborator": "邀请协作者",
   "invitations.pickWorkspaceFirst": "请先选择一个工作区",
-  "invitations.usernamePlaceholder": "GitHub 用户名或邮箱",
+  "invitations.usernamePlaceholder": "用户名或邮箱",
   "invitations.invite": "邀请",
   "invitations.workspaceMembers": "工作区成员",
   "invitations.workspaceMembersSub": "工作区成员 · 角色继承自 provider",
@@ -1247,6 +1251,10 @@ const en: Record<string, string> = {
   "publishPage.commentNote": "These are normal PR conversation comments. Line-level review comments require GitHub diff position mapping and are not wired yet.",
   "publishPage.unsupportedTitle": "Publish PRs unavailable",
   "publishPage.unsupportedDesc": "{provider} is not wired into the publish PR page yet.",
+  "permissions.loginRequired": "Log in to {provider} before running this action.",
+  "permissions.gitlabApiScopeRequired": "The current {provider} token is missing or cannot confirm the api scope. Reconnect with a token that includes api.",
+  "permissions.workspaceWriteRequired": "Your workspace role is {role}; Write, Maintain, or Admin permission is required.",
+  "permissions.workspaceMaintainRequired": "Your workspace role is {role}; Maintain or Admin permission is required.",
 
   // --- Activity Page (extra) ---
   "activity.selectWorkspace": "Select a workspace from the picker to see recent activity.",
@@ -1264,7 +1272,7 @@ const en: Record<string, string> = {
   "invitations.noInvitations": "No pending repository invitations on GitHub.",
   "invitations.inviteCollaborator": "Invite collaborator",
   "invitations.pickWorkspaceFirst": "Pick a workspace first",
-  "invitations.usernamePlaceholder": "GitHub username or email",
+  "invitations.usernamePlaceholder": "Username or email",
   "invitations.invite": "Invite",
   "invitations.workspaceMembers": "Workspace members",
   "invitations.workspaceMembersSub": "Live workspace members · roles inherited from the provider",

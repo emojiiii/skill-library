@@ -19,7 +19,7 @@ import {
   listWorkspacePullRequests,
   mergeWorkspacePullRequest,
 } from "../lib/skill-library";
-import { formatRelativeTime, openExternalUrl } from "../utils/format";
+import { formatError, formatRelativeTime, openExternalUrl } from "../utils/format";
 import { Card } from "../widgets/Card";
 import { MetricTile } from "../widgets/MetricTile";
 import { Pill } from "../widgets/Pill";
@@ -28,20 +28,18 @@ import { SegmentedTabs } from "../widgets/SegmentedTabs";
 
 const EMPTY_PRS: WorkspacePullRequest[] = [];
 
-function formatError(err: unknown) {
-  return err instanceof Error ? err.message : String(err);
-}
-
 export function PublishPage({
   workspaceRef,
   providerName = "GitHub",
   supportsPullRequests = true,
   supportsPullRequestActions = true,
+  pullRequestActionBlockedReason = null,
 }: {
   workspaceRef: string;
   providerName?: string;
   supportsPullRequests?: boolean;
   supportsPullRequestActions?: boolean;
+  pullRequestActionBlockedReason?: string | null;
 }) {
   const { t } = useLocale();
   const queryClient = useQueryClient();
@@ -239,6 +237,7 @@ export function PublishPage({
                   closePending={closeMutation.isPending}
                   commentPending={commentMutation.isPending}
                   supportsActions={supportsPullRequestActions}
+                  actionBlockedReason={pullRequestActionBlockedReason}
                   onMerge={(pr) => mergeMutation.mutate(pr)}
                   onClose={(input) => closeMutation.mutate(input)}
                   onComment={(input) => commentMutation.mutate(input)}
@@ -315,6 +314,7 @@ function PullRequestDetail({
   closePending,
   commentPending,
   supportsActions,
+  actionBlockedReason,
   onMerge,
   onClose,
   onComment,
@@ -325,6 +325,7 @@ function PullRequestDetail({
   closePending: boolean;
   commentPending: boolean;
   supportsActions: boolean;
+  actionBlockedReason?: string | null;
   onMerge: (pr: WorkspacePullRequest) => void;
   onClose: (input: { pr: WorkspacePullRequest; comment: string }) => void;
   onComment: (input: { pr: WorkspacePullRequest; body: string }) => void;
@@ -356,6 +357,9 @@ function PullRequestDetail({
   const openPr = pr.state === "open" && !pr.merged;
   const files = filesQuery.data ?? [];
   const body = pr.body?.trim();
+  const showBlockedToast = () => {
+    if (actionBlockedReason) toast.warning(actionBlockedReason);
+  };
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -415,89 +419,103 @@ function PullRequestDetail({
 
         {openPr && supportsActions ? (
           <div className="mt-3 flex flex-wrap items-center gap-2">
-            <AlertDialog>
-              <Button size="sm" variant="outline" isDisabled={mergePending || closePending}>
+            {actionBlockedReason ? (
+              <Button size="sm" variant="outline" className="opacity-60" onPress={showBlockedToast}>
                 <GitMerge size={14} />
                 {t("publishPage.merge")}
               </Button>
-              <AlertDialog.Backdrop>
-                <AlertDialog.Container size="sm">
-                  <AlertDialog.Dialog className="sm:max-w-[420px]">
-                    <AlertDialog.CloseTrigger />
-                    <AlertDialog.Header>
-                      <AlertDialog.Icon status="success" />
-                      <AlertDialog.Heading>{t("publishPage.mergeTitle")}</AlertDialog.Heading>
-                    </AlertDialog.Header>
-                    <AlertDialog.Body>
-                      <div className="space-y-2 text-[13px] leading-[1.5] text-[var(--fg-secondary)]">
-                        <p>{t("publishPage.mergeDesc")}</p>
-                        <div className="rounded-md border border-[var(--line)] bg-[var(--bg-soft)] px-3 py-2">
-                          <div className="truncate font-medium text-[var(--fg)]">{pr.title}</div>
-                          <div className="mt-0.5 truncate font-mono text-[11px] text-[var(--fg-muted)]">
-                            {pr.head_ref} → {pr.base_ref}
+            ) : (
+              <AlertDialog>
+                <Button size="sm" variant="outline" isDisabled={mergePending || closePending}>
+                  <GitMerge size={14} />
+                  {t("publishPage.merge")}
+                </Button>
+                <AlertDialog.Backdrop>
+                  <AlertDialog.Container size="sm">
+                    <AlertDialog.Dialog className="sm:max-w-[420px]">
+                      <AlertDialog.CloseTrigger />
+                      <AlertDialog.Header>
+                        <AlertDialog.Icon status="success" />
+                        <AlertDialog.Heading>{t("publishPage.mergeTitle")}</AlertDialog.Heading>
+                      </AlertDialog.Header>
+                      <AlertDialog.Body>
+                        <div className="space-y-2 text-[13px] leading-[1.5] text-[var(--fg-secondary)]">
+                          <p>{t("publishPage.mergeDesc")}</p>
+                          <div className="rounded-md border border-[var(--line)] bg-[var(--bg-soft)] px-3 py-2">
+                            <div className="truncate font-medium text-[var(--fg)]">{pr.title}</div>
+                            <div className="mt-0.5 truncate font-mono text-[11px] text-[var(--fg-muted)]">
+                              {pr.head_ref} → {pr.base_ref}
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    </AlertDialog.Body>
-                    <AlertDialog.Footer>
-                      <Button slot="close" variant="outline">
-                        {t("common.cancel")}
-                      </Button>
-                      <Button
-                        slot="close"
-                        onPress={() => onMerge(pr)}
-                        isPending={mergePending}
-                      >
-                        {t("publishPage.confirmMerge")}
-                      </Button>
-                    </AlertDialog.Footer>
-                  </AlertDialog.Dialog>
-                </AlertDialog.Container>
-              </AlertDialog.Backdrop>
-            </AlertDialog>
+                      </AlertDialog.Body>
+                      <AlertDialog.Footer>
+                        <Button slot="close" variant="outline">
+                          {t("common.cancel")}
+                        </Button>
+                        <Button
+                          slot="close"
+                          onPress={() => onMerge(pr)}
+                          isPending={mergePending}
+                        >
+                          {t("publishPage.confirmMerge")}
+                        </Button>
+                      </AlertDialog.Footer>
+                    </AlertDialog.Dialog>
+                  </AlertDialog.Container>
+                </AlertDialog.Backdrop>
+              </AlertDialog>
+            )}
 
-            <AlertDialog>
-              <Button size="sm" variant="danger-soft" isDisabled={mergePending || closePending}>
+            {actionBlockedReason ? (
+              <Button size="sm" variant="danger-soft" className="opacity-60" onPress={showBlockedToast}>
                 <XCircle size={14} />
                 {t("publishPage.rejectClose")}
               </Button>
-              <AlertDialog.Backdrop>
-                <AlertDialog.Container size="sm">
-                  <AlertDialog.Dialog className="sm:max-w-[460px]">
-                    <AlertDialog.CloseTrigger />
-                    <AlertDialog.Header>
-                      <AlertDialog.Icon status="danger" />
-                      <AlertDialog.Heading>{t("publishPage.closeTitle")}</AlertDialog.Heading>
-                    </AlertDialog.Header>
-                    <AlertDialog.Body>
-                      <div className="space-y-3 text-[13px] leading-[1.5] text-[var(--fg-secondary)]">
-                        <p>{t("publishPage.closeDesc")}</p>
-                        <textarea
-                          value={closeComment}
-                          onChange={(event) => setCloseComment(event.target.value)}
-                          rows={5}
-                          className="w-full resize-y rounded-md border border-[var(--line)] bg-[var(--bg-elevated)] px-3 py-2 text-[13px] text-[var(--fg)] outline-none focus:border-[var(--brand)] focus:ring-2 focus:ring-[var(--brand-soft)]"
-                          placeholder={t("publishPage.closePlaceholder")}
-                        />
-                      </div>
-                    </AlertDialog.Body>
-                    <AlertDialog.Footer>
-                      <Button slot="close" variant="outline">
-                        {t("common.cancel")}
-                      </Button>
-                      <Button
-                        slot="close"
-                        variant="danger-soft"
-                        onPress={() => onClose({ pr, comment: closeComment })}
-                        isPending={closePending}
-                      >
-                        {t("publishPage.confirmClose")}
-                      </Button>
-                    </AlertDialog.Footer>
-                  </AlertDialog.Dialog>
-                </AlertDialog.Container>
-              </AlertDialog.Backdrop>
-            </AlertDialog>
+            ) : (
+              <AlertDialog>
+                <Button size="sm" variant="danger-soft" isDisabled={mergePending || closePending}>
+                  <XCircle size={14} />
+                  {t("publishPage.rejectClose")}
+                </Button>
+                <AlertDialog.Backdrop>
+                  <AlertDialog.Container size="sm">
+                    <AlertDialog.Dialog className="sm:max-w-[460px]">
+                      <AlertDialog.CloseTrigger />
+                      <AlertDialog.Header>
+                        <AlertDialog.Icon status="danger" />
+                        <AlertDialog.Heading>{t("publishPage.closeTitle")}</AlertDialog.Heading>
+                      </AlertDialog.Header>
+                      <AlertDialog.Body>
+                        <div className="space-y-3 text-[13px] leading-[1.5] text-[var(--fg-secondary)]">
+                          <p>{t("publishPage.closeDesc")}</p>
+                          <textarea
+                            value={closeComment}
+                            onChange={(event) => setCloseComment(event.target.value)}
+                            rows={5}
+                            className="w-full resize-y rounded-md border border-[var(--line)] bg-[var(--bg-elevated)] px-3 py-2 text-[13px] text-[var(--fg)] outline-none focus:border-[var(--brand)] focus:ring-2 focus:ring-[var(--brand-soft)]"
+                            placeholder={t("publishPage.closePlaceholder")}
+                          />
+                        </div>
+                      </AlertDialog.Body>
+                      <AlertDialog.Footer>
+                        <Button slot="close" variant="outline">
+                          {t("common.cancel")}
+                        </Button>
+                        <Button
+                          slot="close"
+                          variant="danger-soft"
+                          onPress={() => onClose({ pr, comment: closeComment })}
+                          isPending={closePending}
+                        >
+                          {t("publishPage.confirmClose")}
+                        </Button>
+                      </AlertDialog.Footer>
+                    </AlertDialog.Dialog>
+                  </AlertDialog.Container>
+                </AlertDialog.Backdrop>
+              </AlertDialog>
+            )}
           </div>
         ) : null}
       </div>
@@ -543,6 +561,10 @@ function PullRequestDetail({
               <Button
                 size="sm"
                 onPress={() => {
+                  if (actionBlockedReason) {
+                    showBlockedToast();
+                    return;
+                  }
                   onComment({ pr, body: comment });
                   setComment("");
                 }}
@@ -552,8 +574,12 @@ function PullRequestDetail({
                 <MessageSquare size={14} />
                 {t("publishPage.submitComment")}
               </Button>
-              <div className="mt-auto rounded-md border border-[var(--line)] bg-[var(--bg-soft)] px-3 py-2 text-[11.5px] leading-5 text-[var(--fg-muted)]">
-                {t("publishPage.commentNote")}
+              <div className={`mt-auto rounded-md border px-3 py-2 text-[11.5px] leading-5 ${
+                actionBlockedReason
+                  ? "border-[var(--warning)] bg-[var(--warning-soft)] text-[var(--warning)]"
+                  : "border-[var(--line)] bg-[var(--bg-soft)] text-[var(--fg-muted)]"
+              }`}>
+                {actionBlockedReason ?? t("publishPage.commentNote")}
               </div>
             </div>
           </aside>

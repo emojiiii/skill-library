@@ -4,6 +4,10 @@ type StructuredErrorLike = {
   code?: unknown;
   message?: unknown;
   error?: unknown;
+  error_description?: unknown;
+  reason?: unknown;
+  hint?: unknown;
+  scope?: unknown;
 };
 
 export const formatError = (error: unknown): string => {
@@ -13,10 +17,17 @@ export const formatError = (error: unknown): string => {
   if (error && typeof error === "object") {
     const value = error as StructuredErrorLike;
     if (value.error) {
-      return formatError(value.error);
+      const formattedError = formatError(value.error);
+      const description = typeof value.error_description === "string" ? value.error_description : null;
+      const scope = typeof value.scope === "string" ? value.scope : null;
+      return [formattedError, description, scope ? `required scope: ${scope}` : null]
+        .filter(Boolean)
+        .join(" - ");
     }
     const code = typeof value.code === "string" ? value.code : null;
-    const message = typeof value.message === "string" ? value.message : null;
+    const message = value.message === undefined ? null : formatError(value.message);
+    const reason = value.reason === undefined ? null : formatError(value.reason);
+    const hint = value.hint === undefined ? null : formatError(value.hint);
     if (code && message) {
       return `${code}: ${message}`;
     }
@@ -25,6 +36,18 @@ export const formatError = (error: unknown): string => {
     }
     if (code) {
       return code;
+    }
+    if (reason) {
+      return reason;
+    }
+    if (hint) {
+      return hint;
+    }
+    try {
+      const serialized = JSON.stringify(error);
+      if (serialized && serialized !== "{}") return serialized;
+    } catch {
+      // Fall through to the String() fallback below.
     }
   }
   return String(error);
